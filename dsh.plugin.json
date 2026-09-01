@@ -1,0 +1,27 @@
+{
+  "id": "dsh-external/dsh-session-bridge",
+  "version": "0.2.0",
+  "main": "./lib/index.js",
+  "description": "会话桥：创建主会话 / 向任意会话发消息 / 等待回复 / 读取消息 / 按名或 id 查找会话（支持跨工作区）；另含监控/调度主任务与归档会话。",
+  "engines": {
+    "dsh": "^0.1.0-rc.6 || ^0.1.1-0 || ^0.1.2-0"
+  },
+  "contributes": {
+    "tools": [
+      "session_bridge_create",
+      "session_bridge_send",
+      "session_bridge_resume",
+      "session_bridge_wait",
+      "session_bridge_read",
+      "session_bridge_find",
+      "session_bridge_status",
+      "session_bridge_cancel",
+      "session_bridge_monitor_start",
+      "session_bridge_monitor_stop",
+      "session_bridge_monitor_list",
+      "session_bridge_archive",
+      "session_bridge_archived"
+    ],
+    "skills": []
+  }
+}
