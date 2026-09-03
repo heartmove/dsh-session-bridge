@@ -60,6 +60,32 @@ export interface BridgeFindItem {
   agentPreset?: string
 }
 
+/**
+ * 兼容读取不同 dsh-session 版本上的会话事件：
+ * - 旧版 `Session` 暴露 `get events(): readonly SessionEvent[]`；
+ * - 新版（如宿主实际运行的 0.1.2-rc.x）将 `get events` 改为
+ *   `snapshotEvents(fromSeq?, toSeqExclusive?)` 方法——`.events` 直接读取会
+ *   得到 `undefined`，对 for...of 迭代即抛 `events is not iterable`。
+ * 两者都读不到（或 session 不存在）时回退为空数组，绝不抛迭代错误。
+ */
+export function sessionEvents(session: unknown): readonly SessionEvent[] {
+  const s = session as {
+    events?: readonly SessionEvent[]
+    snapshotEvents?: (fromSeq?: number, toSeqExclusive?: number) => readonly SessionEvent[]
+  } | null | undefined
+  if (s === null || s === undefined) return []
+  if (Array.isArray(s.events)) return s.events
+  if (typeof s.snapshotEvents === 'function') {
+    try { return s.snapshotEvents() } catch { return [] }
+  }
+  return []
+}
+
+/** 规约任意"事件列表"值为数组（非数组 → []），避免 events is not iterable。 */
+export function asEventList(events: unknown): readonly SessionEvent[] {
+  return Array.isArray(events) ? events : []
+}
+
 /** agent.followup / steer 接受的用户消息值。 */
 export function userMessage(text: string): unknown {
   return {
@@ -104,8 +130,9 @@ function toolNamesOf(toolCalls: unknown): string[] {
 
 /** 折叠会话事件日志为可读消息行（跳过非 user 来源与空消息）。 */
 export function foldMessages(events: readonly SessionEvent[]): BridgeMessageRow[] {
+  const list = asEventList(events)
   const rows: BridgeMessageRow[] = []
-  for (const event of events) {
+  for (const event of list) {
     if (event.type === 'user/message') {
       const source = (event.data as { source?: { kind?: string } }).source
       if (source !== undefined && source.kind !== 'user') continue
@@ -134,8 +161,9 @@ export function foldMessages(events: readonly SessionEvent[]): BridgeMessageRow[
  * 无标题事件时回落为第一条用户消息（截断 80 字符）。
  */
 export function titleOf(events: readonly SessionEvent[]): string | undefined {
+  const list = asEventList(events)
   let title: string | undefined
-  for (const event of events) {
+  for (const event of list) {
     const raw = event as unknown as { type: string; data: { title?: unknown } }
     if (raw.type === 'session/title') {
       const t = raw.data.title
@@ -143,7 +171,7 @@ export function titleOf(events: readonly SessionEvent[]): string | undefined {
     }
   }
   if (title !== undefined) return title
-  for (const event of events) {
+  for (const event of list) {
     if (event.type === 'user/message') {
       const source = (event.data as { source?: { kind?: string } }).source
       if (source !== undefined && source.kind !== 'user') continue
@@ -159,8 +187,9 @@ export function titleOf(events: readonly SessionEvent[]): string | undefined {
 
 /** 日志最大事件序号。 */
 export function maxSeq(events: readonly SessionEvent[]): number {
+  const list = asEventList(events)
   let m = -1
-  for (const event of events) if (event.seq > m) m = event.seq
+  for (const event of list) if (event.seq > m) m = event.seq
   return m
 }
 
@@ -197,7 +226,7 @@ export async function waitForReply(opts: WaitForReplyOptions): Promise<BridgeWai
   let turnEnded = false
   for (;;) {
     if (opts.signal !== undefined && opts.signal.aborted) break
-    const events = opts.session.events
+    const events = sessionEvents(opts.session)
     for (const row of foldMessages(events)) {
       if (row.seq <= opts.baselineSeq || row.role !== 'assistant') continue
       if (latest === null || row.seq > latest.seq) latest = row
@@ -324,7 +353,7 @@ export interface BridgeStatusSnapshot {
  * 纯读，无副作用。用于 `session_bridge_status`。
  */
 export function statusSnapshot(ctx: Context, agent: LiveAgentLike): BridgeStatusSnapshot {
-  const events = agent.session.events
+  const events = sessionEvents(agent.session)
   const rows = foldMessages(events)
   let lastActivityAt: number | null = null
   let lastTurn = 0

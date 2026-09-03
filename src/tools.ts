@@ -22,6 +22,7 @@ import {
   foldMessages,
   maxSeq,
   resolveTargetCwd,
+  sessionEvents,
   statusSnapshot,
   titleOf,
   userMessage,
@@ -236,7 +237,7 @@ function registerCreate(env: BridgeEnv): void {
 
       let reply: ReturnType<typeof renderWait> | undefined
       if (typeof args.prompt === 'string' && args.prompt.trim() !== '') {
-        const baseline = maxSeq(agent.session.events)
+        const baseline = maxSeq(sessionEvents(agent.session))
         agent.followup(userMessage(args.prompt.trim()))
         env.registry.touch(sessionId)
         if (args.waitForReply === true) {
@@ -294,7 +295,7 @@ function registerSend(env: BridgeEnv): void {
       if (agent === undefined) {
         throw new Error('session ' + JSON.stringify(args.sessionId) + ' is not live — call session_bridge_resume first to bring it online (or session_bridge_find to locate it)')
       }
-      const baseline = maxSeq(agent.session.events)
+      const baseline = maxSeq(sessionEvents(agent.session))
       if (args.mode === 'steer') agent.steer(userMessage(args.message.trim()))
       else agent.followup(userMessage(args.message.trim()))
       const headerCwd = agent.session.header.cwd
@@ -346,7 +347,7 @@ function registerResume(env: BridgeEnv): void {
           sessionId: args.sessionId,
           alreadyLive: true,
           ...(existing.session.header.cwd === undefined ? {} : { cwd: existing.session.header.cwd }),
-          title: titleOf(existing.session.events) ?? null,
+          title: titleOf(sessionEvents(existing.session)) ?? null,
           running: existing.status === 'running',
         })
       }
@@ -381,7 +382,7 @@ function registerResume(env: BridgeEnv): void {
         sessionId: args.sessionId,
         resumed: true,
         ...(headerCwd === undefined ? {} : { cwd: headerCwd }),
-        title: titleOf(handle.agent.session.events) ?? null,
+        title: titleOf(sessionEvents(handle.agent.session)) ?? null,
       })
     },
   }))
@@ -432,7 +433,7 @@ function registerWait(env: BridgeEnv): void {
         baseline = args.sinceSeq
       } else {
         let lastText = -1
-        for (const row of foldMessages(agent.session.events)) {
+        for (const row of foldMessages(sessionEvents(agent.session))) {
           if (row.text !== undefined) lastText = row.seq
         }
         baseline = lastText
@@ -494,7 +495,7 @@ function registerRead(env: BridgeEnv): void {
       let live: boolean
       let cwd: string | undefined
       if (agent !== undefined) {
-        events = agent.session.events
+        events = sessionEvents(agent.session)
         live = true
         cwd = agent.session.header.cwd
       } else {
@@ -592,7 +593,7 @@ function registerFind(env: BridgeEnv): void {
         const wsId = wsById.get(agent.id) ?? workspaceByPath(env.ctx, headerCwd)
         items.push({
           sessionId: agent.id,
-          title: titleOf(agent.session.events),
+          title: titleOf(sessionEvents(agent.session)),
           ...(headerCwd === undefined ? {} : { cwd: headerCwd }),
           ...(wsId === undefined ? {} : { workspaceId: wsId }),
           live: true,
