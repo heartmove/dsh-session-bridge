@@ -15,8 +15,8 @@ jobs:
   publish:
     name: Build and publish
     runs-on: ubuntu-latest
-    # Never publish from a fork.
-    if: github.repository_owner == 'heartmove'
+    # Only ever publish from a v* tag — never on a branch push (e.g. master).
+    if: github.repository_owner == 'heartmove' && startsWith(github.ref, 'refs/tags/v')
 
     steps:
       - name: Checkout
