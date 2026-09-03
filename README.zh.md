@@ -68,6 +68,19 @@ DSH web 从活动 profile 加载外部插件。本包是一个 **bundle**：`pac
 `dsh.bundle.patch` → [`cordis.patch.yml`](./cordis.patch.yml)，其 `insert` 行挂载插件。
 正是这一声明让 `dsh plugin add` 能**一步安装并激活**本包。
 
+### 从 npm 安装
+
+本包已发布到 [npmjs.com](https://www.npmjs.com/package/dsh-session-bridge)。
+发布由 `publish.yml` GitHub Actions 工作流在 `v*` 标签触发；发布前会把
+`package.json` 与 `dsh.plugin.json` 的版本同步到该标签。
+
+```bash
+npx -p @deepseek-ai/dsh dsh plugin --profile web add dsh-session-bridge
+```
+
+pnpm 会安装发布的 tarball 并运行其 `prepare` 脚本（`tsdown`）以确保 `lib/` 就绪，
+随后 `dsh` 激活该 bundle。
+
 ### 从 GitHub 安装
 
 ```bash

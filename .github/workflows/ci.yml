@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    name: Install, typecheck, build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      # The package's @deepseek-ai/dsh-* peer/prerelease ranges (and the local
+      # DSH checkout the host build.sh symlinks against) target the DSH
+      # 0.1.2-alpha.2 API surface (Session.events), which is carried only by
+      # the 0.1.2-alpha.2 release on the registry. CI therefore pins every
+      # @deepseek-ai/dsh-* package (mostly a prerelease that npm/pnpm never
+      # matches against a bare "0.1.2" range) explicitly to that alpha line so
+      # the typecheck / bundle resolve from the registry instead of a local
+      # harness checkout. Bump these together with the code when you migrate.
+      - name: Write registry-resolvable pnpm-workspace overrides
+        shell: bash
+        run: |
+          cat > pnpm-workspace.yaml <<'EOF'
+          packages:
+            - .
+          overrides:
+            '@deepseek-ai/dsh-agent': npm:@deepseek-ai/dsh-agent@0.1.2-alpha.2
+            '@deepseek-ai/dsh-agent-presets': npm:@deepseek-ai/dsh-agent-presets@0.1.2-alpha.2
+            '@deepseek-ai/dsh-home-paths': npm:@deepseek-ai/dsh-home-paths@0.1.2-alpha.2
+            '@deepseek-ai/dsh-llm': npm:@deepseek-ai/dsh-llm@0.1.2-alpha.2
+            '@deepseek-ai/dsh-session': npm:@deepseek-ai/dsh-session@0.1.2-alpha.2
+            '@deepseek-ai/dsh-session-persistence': npm:@deepseek-ai/dsh-session-persistence@0.1.2-alpha.2
+            '@deepseek-ai/dsh-tools': npm:@deepseek-ai/dsh-tools@0.1.2-alpha.2
+            '@deepseek-ai/dsh-workspace': npm:@deepseek-ai/dsh-workspace@0.1.2-alpha.2
+            '@deepseek-ai/dsh-util-values': npm:@deepseek-ai/dsh-util-values@0.1.2-alpha.2
+            '@deepseek-ai/dsh-scope': npm:@deepseek-ai/dsh-scope@0.1.2-alpha.2
+            '@deepseek-ai/dsh-brand': npm:@deepseek-ai/dsh-brand@0.1.2-alpha.2
+            '@deepseek-ai/schemastery': npm:@deepseek-ai/schemastery@3.18.2
+            '@deepseek-ai/cordis': npm:@deepseek-ai/cordis@4.0.2
+            cordis: npm:@deepseek-ai/cordis@4.0.2
+          EOF
+
+      # The package's "build" script is bash scripts/build.sh which requires a
+      # local DSH_CHECKOUT (for type-linking) — it does not run in CI. The
+      # self-contained ESM bundle is produced by tsdown (build:client), which
+      # inlines every non-node: import and needs no checkout.
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build:client
+
+      - name: Pack
+        run: pnpm pack --pack-destination .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-session-bridge-${{ matrix.node-version }}
+          path: |
+            dsh-session-bridge-*.tgz
+            lib/
+          if-no-files-found: ignore

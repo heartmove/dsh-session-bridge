@@ -1,0 +1,85 @@
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # Allow manual re-runs of a failed publish.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    # Never publish from a fork.
+    if: github.repository_owner == 'heartmove'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      # Same registry-resolvable pin as ci.yml — the code targets the DSH
+      # 0.1.2-alpha.2 API surface (Session.events), so resolve the @deepseek-ai
+      # dsh-* prerelease line explicitly from the registry instead of a local
+      # harness checkout. Bump together with the code when you migrate.
+      - name: Write registry-resolvable pnpm-workspace overrides
+        shell: bash
+        run: |
+          cat > pnpm-workspace.yaml <<'EOF'
+          packages:
+            - .
+          overrides:
+            '@deepseek-ai/dsh-agent': npm:@deepseek-ai/dsh-agent@0.1.2-alpha.2
+            '@deepseek-ai/dsh-agent-presets': npm:@deepseek-ai/dsh-agent-presets@0.1.2-alpha.2
+            '@deepseek-ai/dsh-home-paths': npm:@deepseek-ai/dsh-home-paths@0.1.2-alpha.2
+            '@deepseek-ai/dsh-llm': npm:@deepseek-ai/dsh-llm@0.1.2-alpha.2
+            '@deepseek-ai/dsh-session': npm:@deepseek-ai/dsh-session@0.1.2-alpha.2
+            '@deepseek-ai/dsh-session-persistence': npm:@deepseek-ai/dsh-session-persistence@0.1.2-alpha.2
+            '@deepseek-ai/dsh-tools': npm:@deepseek-ai/dsh-tools@0.1.2-alpha.2
+            '@deepseek-ai/dsh-workspace': npm:@deepseek-ai/dsh-workspace@0.1.2-alpha.2
+            '@deepseek-ai/dsh-util-values': npm:@deepseek-ai/dsh-util-values@0.1.2-alpha.2
+            '@deepseek-ai/dsh-scope': npm:@deepseek-ai/dsh-scope@0.1.2-alpha.2
+            '@deepseek-ai/dsh-brand': npm:@deepseek-ai/dsh-brand@0.1.2-alpha.2
+            '@deepseek-ai/schemastery': npm:@deepseek-ai/schemastery@3.18.2
+            '@deepseek-ai/cordis': npm:@deepseek-ai/cordis@4.0.2
+            cordis: npm:@deepseek-ai/cordis@4.0.2
+          EOF
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build:client
+
+      - name: Resolve package version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Sync version
+        run: |
+          pnpm version ${{ steps.version.outputs.version }} --no-git-tag-version
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));const m=JSON.parse(fs.readFileSync('dsh.plugin.json','utf8'));m.version=p.version;fs.writeFileSync('dsh.plugin.json',JSON.stringify(m,null,2)+'\n')"
+
+      - name: Publish to npm
+        run: pnpm publish --no-git-checks --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

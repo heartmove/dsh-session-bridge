@@ -79,6 +79,13 @@ bash scripts/build.sh && npm run build:client
 dev_build_plugin dsh-session-bridge
 ```
 
+`build.sh` type-links against a local DSH checkout and is only for local dev.
+The GitHub Actions CI (`ci.yml`) instead resolves the `@deepseek-ai/dsh-*`
+prereleases from the registry — pinned to the `0.1.2-alpha.2` line, which is
+the DSH API surface this code targets — then runs `pnpm typecheck` and
+`pnpm build:client` (the self-contained `tsdown` bundle). Bump that pin
+together with the code when you migrate to a newer DSH API.
+
 ## Deploy
 
 DSH web loads external plugins from the active profile. This package is a
@@ -86,6 +93,20 @@ DSH web loads external plugins from the active profile. This package is a
 [`cordis.patch.yml`](./cordis.patch.yml), whose `insert` row mounts the plugin.
 That declaration is what lets `dsh plugin add` install the package *and*
 activate it in one step.
+
+### Install from npm
+
+The package is published to [npmjs.com](https://www.npmjs.com/package/dsh-session-bridge).
+Releases are cut on a `v*` git tag by the `publish.yml` GitHub Actions workflow;
+`package.json` and `dsh.plugin.json` versions are synced to that tag before
+publishing.
+
+```bash
+npx -p @deepseek-ai/dsh dsh plugin --profile web add dsh-session-bridge
+```
+
+pnpm installs the published tarball and runs its `prepare` script (`tsdown`) to
+ensure `lib/` is present, then `dsh` activates the bundle.
 
 ### Install from GitHub
 
