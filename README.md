@@ -20,13 +20,23 @@ action does.
 - **Send messages to any session.** `session_bridge_send` appends a turn
   (`mode=queue`) or injects steering into the running step (`mode=steer`), and
   can optionally wait for the next reply.
-- **Wait for a reply.** `session_bridge_wait` blocks until a new text assistant
-  reply appears after a given seq; with `requireTurnEnd` it also waits for the
-  turn to settle. Timeout / abort return the partial result rather than
-  throwing.
+- **Wait for a reply or a segment.** `session_bridge_wait` blocks until new
+  assistant output appears after a given seq: `waitFor=reply` (default) returns
+  as soon as a new **text** reply is readable; `waitFor=segment` returns as
+  soon as any new **completed output step** appears (an `assistant/message` —
+  text, reasoning, or tool-call turn), *without* waiting for the whole turn, so
+  you can observe output paragraph by paragraph as it is produced. With
+  `requireTurnEnd` it additionally waits for the turn to settle.
+  Timeout / abort return the partial result rather than throwing.
 - **Read any session.** `session_bridge_read` folds a session's event log into
   readable rows — live or offline (from persistence) — with `sinceSeq` paging,
   role filtering, and a `limit` (default 20, max 100).
+- **Read output paragraph by paragraph.** `session_bridge_segments` returns the
+  session's **completed output segments** — every finished assistant step (one
+  `assistant/message`: its text, reasoning, and requested tool calls) as its own
+  row, paged forward via `sinceSeq`, returning the next cursor. It works live or
+  offline and does **not** wait for the whole turn, so you can follow a long
+  agentic run step by step (chain-of-thought included when the model streams it).
 - **Resume offline sessions.** `session_bridge_resume` brings a persisted
   session back online (idempotent); it can also override provider / model.
 - **Find sessions.** `session_bridge_find` matches by title, id, workspace, or
@@ -62,6 +72,40 @@ task is wrapped up rather than nudged forever. Logs go to
 `~/.dsh/super-injector/dsh-session-bridge-monitor.log` (overridable).
 
 Control it with `session_bridge_monitor_start` / `_stop` / `_list`.
+
+### Chain-of-thought monitoring & rules
+
+The bridge can watch another session's **chain-of-thought** (reasoning) in real
+time — not just its final reply — and act on it:
+
+- **Observe it live.** `session_bridge_status` returns three chain-of-thought
+  fields on a running session: `lastReasoning` (the most recent finalized
+  reasoning block), `liveReasoning` (the in-flight reasoning streamed for the
+  current handled turn, from `assistant/chunk` `reasoning-delta` events), and
+  `reasoningTail` (a compact, char-bounded merged preview). Use the
+  `reasoning` param (`none | last | live | tail`) to pick which fields come
+  back; `tail` is the default and costs the least.
+- **Read paragraph by paragraph.** `session_bridge_segments` returns each completed output
+  step (one `assistant/message` — text, reasoning, or tool-call turn) as its own segment,
+  paged forward via `sinceSeq`, without waiting for the whole turn.
+- **Or read it per message.** `session_bridge_read` with `includeReasoning`
+  returns the finalized reasoning of each assistant message.
+- **Enforce rules.** `session_bridge_monitor_start` accepts `coRules` — an
+  array of { match: contains|not-contains, field: reasoning|text|both,
+  value: string, action: steer|cancel, message?: string } and `cotMinHits`.
+  Each poll the watchdog matches the rule's condition against the live
+  reasoning/text and, once it stays matched for `cotMinHits` consecutive polls
+  (default 1), fires the action: `steer` injects a guiding user message,
+  `cancel` terminates the session. Example — "stop the session the moment its
+  reasoning no longer contains I'm" becomes:
+
+      coRules: [{ "match": "not-contains", "field": "reasoning", "value": "I'm", "action": "cancel" }]
+
+  Caveats: a `not-contains` rule on `reasoning` deliberately **does not fire**
+  when the target session produces no reasoning at all (e.g. a non-reasoning
+  model or reasoningEffort off), so you don't cancel sessions that simply
+  don't stream a chain-of-thought. Repeated fires are throttled by a cooldown,
+  and each evaluation/trigger is written to the monitor log.
 
 ## Requirements
 
@@ -186,13 +230,14 @@ registration and junction; not re-assembled on restart).
 |---|---|
 | `session_bridge_create` | Create a main session (current or another workspace via `workspaceId` / `cwd`); optional first prompt + `waitForReply`. |
 | `session_bridge_send` | Send a message (`mode=queue`/`steer`); optional wait-for-reply. |
-| `session_bridge_wait` | Wait for a new text assistant reply after `sinceSeq`; optional `requireTurnEnd`. |
+| `session_bridge_wait` | Wait for new output after `sinceSeq`: `waitFor=reply` (text) or `waitFor=segment` (any completed step, no full-turn wait); optional `requireTurnEnd`. |
 | `session_bridge_read` | Read messages — live or offline; `sinceSeq` paging, `role` filter, `limit`. |
+| `session_bridge_segments` | Read completed output segments (each finished assistant step) incrementally by paragraph — live or offline. |
 | `session_bridge_resume` | Bring a persisted session back online (idempotent). |
 | `session_bridge_find` | Find sessions by title / id / workspace / directory across workspaces. |
-| `session_bridge_status` | Read a session's live progress (running, open turn, stall detection, pending work, latest reply). |
+| `session_bridge_status` | Read a session's live progress (running, open turn, stall detection, pending work, latest reply) plus live/finalized chain-of-thought (`reasoning` param). |
 | `session_bridge_cancel` | Stop a running session (abort active turn; clear queued/steering work unless `keepInbox`). |
-| `session_bridge_monitor_start` | Start a background watchdog on a main session (poll, nudge, correct, cancel, wrap up). |
+| `session_bridge_monitor_start` | Start a background watchdog on a main session (poll, nudge, correct, cancel, wrap up); supports chain-of-thought `coRules` (e.g. reasoning not-contains "I'm" → cancel). |
 | `session_bridge_monitor_stop` | Stop a watchdog (keep the session itself running). |
 | `session_bridge_monitor_list` | List active watchdogs and their state. |
 | `session_bridge_archive` | Archive a session (hidden from groupings; history and position preserved). |

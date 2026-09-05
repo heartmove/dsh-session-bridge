@@ -22,6 +22,7 @@ import {
   foldMessages,
   maxSeq,
   resolveTargetCwd,
+  segmentsSince,
   sessionEvents,
   statusSnapshot,
   titleOf,
@@ -31,7 +32,7 @@ import {
   workspaceBySession,
 } from './core.ts'
 import type { BridgeRegistry } from './registry.ts'
-import type { SessionMonitor, MonitorConfig, MonitorEntryState } from './monitor.ts'
+import type { SessionMonitor, MonitorConfig, MonitorEntryState, CoTRule } from './monitor.ts'
 
 type SessionIdBrand = { readonly __sessionIdBrand?: never }
 
@@ -393,17 +394,19 @@ interface WaitArgsTool {
   sinceSeq?: number
   timeoutMs?: number
   requireTurnEnd?: boolean
+  waitFor?: 'reply' | 'segment'
 }
 
 function registerWait(env: BridgeEnv): void {
   env.ctx.tools.register(defineTool({
     name: 'session_bridge_wait',
-    description: 'Wait for a session next assistant reply: blocks (polling the session log) until a NEW assistant text reply appears after sinceSeq (default: the latest seq at call time). Returns the reply summary, or timedOut/aborted when the deadline or caller cancellation ends the wait. Use it to consume a reply produced asynchronously by another session (e.g. a session you sent a message to, or one working on its own).',
+    description: 'Wait for a session next assistant output: blocks (polling the session log) until a NEW assistant output appears after sinceSeq (default: the latest seq at call time). waitFor=reply returns as soon as a new assistant TEXT reply is readable; waitFor=segment returns as soon as any new COMPLETED output segment appears (an assistant/message step — text, reasoning, or tool-call turn), i.e. it does NOT wait for the whole turn, so you can observe the chain-of-thought/output paragraph by paragraph as it is produced. Returns the output summary, or timedOut/aborted when the deadline or caller cancellation ends the wait. Use it to consume output produced asynchronously by another session (e.g. a session you sent a message to, or one working on its own).',
     parameters: {
       sessionId: { type: 'string', required: true, description: 'Session id to wait on.' },
       sinceSeq: { type: 'number', description: 'Only replies after this event seq count (default: latest seq at call time).' },
       timeoutMs: { type: 'number', description: 'Wait budget in milliseconds (default 180000, max 3600000); timed out waits return the partial result instead of failing.' },
       requireTurnEnd: { type: 'boolean', description: 'When true, wait for the reply turn/end to settle before returning (default false; false returns as soon as the reply text is readable).' },
+      waitFor: { type: 'string', enum: ['reply', 'segment'], description: 'reply (default) waits for a new assistant TEXT reply; segment waits for any new completed output segment (an assistant/message step, incl. reasoning/tool turns) and returns it immediately, without waiting for the whole turn.' },
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
@@ -425,12 +428,16 @@ function registerWait(env: BridgeEnv): void {
       if (agent === undefined) {
         throw new Error('session ' + JSON.stringify(args.sessionId) + ' is not live — call session_bridge_resume first (waiting requires a live session)')
       }
-      // 默认 baseline = 当前最后一条带文本 assistant 行的 seq：让 wait 只等待
-      // 之后新出现的文本回复，避免把"已存在的文本"当成待等回复，同时不被
-      // 文本后追加的无文本中间块（推理尾块/工具结果）干扰。
+      // 默认 baseline = 当前最后一条（带文本的）assistant 行的 seq：让 wait 只等待
+      // 之后新出现的输出，避免把"已存在的输出"当成待等内容，同时不被文本后追加的
+      // 无文本中间块（推理尾块/工具结果）干扰。segment 模式下以最后一个已完成段落为界。
+      const waitSegment = args.waitFor === 'segment'
       let baseline: number
       if (typeof args.sinceSeq === 'number' && Number.isInteger(args.sinceSeq) && args.sinceSeq >= 0) {
         baseline = args.sinceSeq
+      } else if (waitSegment) {
+        const segs = segmentsSince(sessionEvents(agent.session))
+        baseline = segs.length === 0 ? -1 : (segs[segs.length - 1]?.seq ?? -1)
       } else {
         let lastText = -1
         for (const row of foldMessages(sessionEvents(agent.session))) {
@@ -444,12 +451,84 @@ function registerWait(env: BridgeEnv): void {
         timeoutMs: clampTimeout(args.timeoutMs),
         signal: exec.signal,
         requireTurnEnd: args.requireTurnEnd === true,
+        ...(waitSegment ? { waitForSegment: true } : {}),
       })
       env.registry.touch(args.sessionId)
       return asJson({
         sessionId: args.sessionId,
         reply: renderWait(result),
         running: agent.status === 'running',
+      })
+    },
+  }))
+}
+
+interface SegmentsArgs {
+  sessionId: string
+  sinceSeq?: number
+  limit?: number
+}
+function registerSegments(env: BridgeEnv): void {
+  env.ctx.tools.register(defineTool({
+    name: 'session_bridge_segments',
+    description: 'Read the completed output segments of a session incrementally - each finished assistant step (one assistant/message paragraph), without waiting for the whole turn. Pass sinceSeq to page forward. Use this to watch a session produce its chain-of-thought / output paragraph by paragraph as each step finishes.',
+    parameters: {
+      sessionId: { type: 'string', required: true, description: 'Session id to read segments from (live or offline).' },
+      sinceSeq: { type: 'number', description: 'Only return completed segments after this event seq (paging cursor).' },
+      limit: { type: 'number', description: 'Maximum number of segments to return (default 10, max 50).' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => {
+        const v = value as Record<string, unknown>
+        const segs = (v.segments as Array<Record<string, unknown>> | null) ?? []
+        if (segs.length === 0) return [{ type: 'text' as const, text: '(no completed segments)' }]
+        const lines = segs.map((sg) => {
+          const head = 'seg #' + String(sg.seq) + ' (turn ' + String(sg.turn) + ' step ' + String(sg.step) + ')'
+          const text = typeof sg.text === 'string' ? sg.text : ''
+          const reason = typeof sg.reasoning === 'string' && sg.reasoning !== '' ? ' [reasoning ' + sg.reasoning.length + ' chars]' : ''
+          const tools = Array.isArray(sg.toolCalls) && sg.toolCalls.length > 0 ? ' [tools: ' + sg.toolCalls.join(',') + ']' : ''
+          return head + tools + reason + ': ' + text.slice(0, 160)
+        })
+        return [{ type: 'text' as const, text: lines.join('\n') }]
+      },
+    },
+    async execute(args: SegmentsArgs) {
+      const agent = liveAgent(env, args.sessionId)
+      let events: readonly SessionEvent[]
+      let live: boolean
+      if (agent !== undefined) {
+        events = sessionEvents(agent.session)
+        live = true
+      } else {
+        try {
+          const persistence = env.ctx.sessionPersistence as unknown as { inspect(id: string): Promise<{ events: readonly SessionEvent[] }> }
+          const inspection = await persistence.inspect(args.sessionId)
+          events = inspection.events
+          live = false
+        } catch (error) {
+          throw new Error(String(error))
+        }
+      }
+      const sinceSeq = typeof args.sinceSeq === 'number' && Number.isInteger(args.sinceSeq) && args.sinceSeq >= 0 ? args.sinceSeq : 0
+      const limit = clampLimit(args.limit, 10, 50)
+      const segs = segmentsSince(events, sinceSeq)
+      env.registry.touch(args.sessionId)
+      const nextCursorSeq = segs.length === 0 ? sinceSeq : (segs[segs.length - 1]?.seq ?? sinceSeq)
+      return asJson({
+        sessionId: args.sessionId,
+        live,
+        nextCursorSeq,
+        segments: segs.map((sg) => ({
+          seq: sg.seq,
+          time: sg.time,
+          turn: sg.turn,
+          step: sg.step,
+          openTurn: sg.openTurn,
+          ...(sg.text === undefined ? {} : { text: sg.text }),
+          ...(sg.reasoning === undefined ? {} : { reasoning: sg.reasoning }),
+          ...(sg.toolCalls.length > 0 ? { toolCalls: sg.toolCalls } : {}),
+        })),
       })
     },
   }))
@@ -699,6 +778,7 @@ export function registerBridgeTools(env: BridgeEnv): void {
   registerSend(env)
   registerResume(env)
   registerWait(env)
+  registerSegments(env)
   registerRead(env)
   registerFind(env)
   registerStatus(env)
@@ -717,6 +797,25 @@ interface MonitorStartArgs {
   onStallSteer?: string
   onOffTrackSteer?: string
   label?: string
+  coRules?: Array<{ match?: string; field?: string; value?: string; action?: string; message?: string }>
+  cotMinHits?: number
+}
+
+/** 校验并规范化 coRules 参数为 CoTRule[]；非法项抛清晰错误。 */
+function parseCoRules(raw: Array<{ match?: string; field?: string; value?: string; action?: string; message?: string }>): CoTRule[] {
+  return raw.map((rule, index) => {
+    const match = rule.match === 'contains' || rule.match === 'not-contains' ? rule.match : (() => { throw new Error('coRules[' + index + '].match must be "contains" or "not-contains"') })()
+    const field = rule.field === 'reasoning' || rule.field === 'text' || rule.field === 'both' ? rule.field : (() => { throw new Error('coRules[' + index + '].field must be "reasoning", "text" or "both"') })()
+    const action = rule.action === 'steer' || rule.action === 'cancel' ? rule.action : (() => { throw new Error('coRules[' + index + '].action must be "steer" or "cancel"') })()
+    const value = typeof rule.value === 'string' && rule.value.trim() !== '' ? rule.value.trim() : (() => { throw new Error('coRules[' + index + '].value must be a non-empty string') })()
+    return {
+      match,
+      field,
+      action,
+      value,
+      ...(typeof rule.message === 'string' && rule.message.trim() !== '' ? { message: rule.message.trim() } : {}),
+    }
+  })
 }
 
 function renderMonitorState(entry: MonitorEntryState): string[] {
@@ -724,6 +823,8 @@ function renderMonitorState(entry: MonitorEntryState): string[] {
   lines.push(`monitoring ${entry.config.sessionId}${entry.config.label === undefined ? '' : ' ("' + entry.config.label + '")'}`)
   lines.push(`interval: ${entry.config.intervalMs}ms | stalled: ${String(entry.config.stalledMs ?? 60000)}ms | maxStuck: ${String(entry.config.maxStuckCycles ?? 3)}`)
   lines.push(`cycles: ${entry.cycles} | stuck: ${entry.stuckCount} | lastAction: ${entry.lastAction}`)
+  const cotCount = (entry.config.coTRules ?? []).length
+  if (cotCount > 0) lines.push(`coRules: ${cotCount} rule(s) (minHits ${String(entry.config.cotMinHits ?? 1)})`)
   if (entry.lastNote !== '') lines.push(`note: ${entry.lastNote}`)
   if (entry.done) lines.push('done: yes')
   return lines
@@ -732,7 +833,7 @@ function renderMonitorState(entry: MonitorEntryState): string[] {
 function registerMonitor(env: BridgeEnv): void {
   env.ctx.tools.register(defineTool({
     name: 'session_bridge_monitor_start',
-    description: 'Start a background watchdog on a main session: poll its progress at an interval, and automatically schedule — steer the session when it stalls (or, with useLlm, when it drifts off-track), cancel it when it stays stuck past maxStuckCycles, and stop when a done keyword appears while idle. This is the "monitor worker" that watches a main task thread and corrects/stops it. Uses session_bridge_status-style facts; pass sessionId of a live session. Returns the watchdog state.',
+    description: 'Start a background watchdog on a main session: poll its progress at an interval, and automatically schedule — steer the session when it stalls (or, with useLlm, when it drifts off-track), cancel it when it stays stuck past maxStuckCycles, and stop when a done keyword appears while idle. It can also enforce chain-of-thought rules via coRules: e.g. coRules=[{match:"not-contains",field:"reasoning",value:"I\'m",action:"cancel"}] stops the session the moment its live reasoning stops containing I\'m (evaluated on each poll while running). This is the "monitor worker" that watches a main task thread and corrects/stops it. Uses session_bridge_status-style facts; pass sessionId of a live session. Returns the watchdog state.',
     parameters: {
       sessionId: { type: 'string', required: true, description: 'Target main session id to watch (must be live).' },
       intervalMs: { type: 'number', description: 'Poll interval in ms (default 10000, min 5000).' },
@@ -743,6 +844,14 @@ function registerMonitor(env: BridgeEnv): void {
       onStallSteer: { type: 'string', description: 'Steer text injected on a stall/nudge (default: ask to summarize progress and continue).' },
       onOffTrackSteer: { type: 'string', description: 'Steer text injected when LLM judges the task off-track (default: ask to return to the original goal).' },
       label: { type: 'string', description: 'Optional human label for logs/display.' },
+      coRules: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
+        match: { type: 'string', required: true, enum: ['contains', 'not-contains'], description: 'contains = must include value in the chosen field; not-contains = must NOT include it.' },
+        field: { type: 'string', required: true, enum: ['reasoning', 'text', 'both'], description: 'Match on reasoning (chain-of-thought), text (reply), or both (either).' },
+        value: { type: 'string', required: true, description: 'The substring to match (non-empty).' },
+        action: { type: 'string', required: true, enum: ['steer', 'cancel'], description: 'steer injects a guiding message; cancel terminates the session.' },
+        message: { type: 'string', description: 'Custom steer text (default is a guidance prompt).' },
+      } }, description: 'Chain-of-thought rules: when a rule stays matched for cotMinHits consecutive polls (default 1), trigger its action. Example: [{match:"not-contains",field:"reasoning",value:"I\'m",action:"cancel"}] stops the session the moment its live reasoning no longer contains I\'m.' },
+      cotMinHits: { type: 'number', description: 'How many consecutive matched polls before a CoT rule fires (default 1 = immediately).' },
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
@@ -765,6 +874,8 @@ function registerMonitor(env: BridgeEnv): void {
         ...(typeof args.onStallSteer === 'string' && args.onStallSteer.trim() !== '' ? { onStallSteer: args.onStallSteer.trim() } : {}),
         ...(typeof args.onOffTrackSteer === 'string' && args.onOffTrackSteer.trim() !== '' ? { onOffTrackSteer: args.onOffTrackSteer.trim() } : {}),
         ...(typeof args.label === 'string' && args.label.trim() !== '' ? { label: args.label.trim() } : {}),
+        ...(Array.isArray(args.coRules) && args.coRules.length > 0 ? { coTRules: parseCoRules(args.coRules) } : {}),
+        ...(typeof args.cotMinHits === 'number' && Number.isInteger(args.cotMinHits) && args.cotMinHits >= 1 ? { cotMinHits: Math.floor(args.cotMinHits) } : {}),
       }
       const entry = env.monitor.start(config)
       env.registry.touch(args.sessionId)
@@ -812,13 +923,32 @@ function registerMonitor(env: BridgeEnv): void {
   }))
 }
 
+type StatusReasoning = 'none' | 'last' | 'live' | 'tail'
+
 interface StatusArgs {
   sessionId: string
   stalledMsThreshold?: number
   recent?: number
+  reasoning?: StatusReasoning
 }
 
-/** 渲染监控快照为一行摘要：运行态 + openTurn + 卡住/待处理 + 最新回复。 */
+/** 按 reasoning 选项裁剪快照里的思维链字段（避免入 token 时有 diff 语义差）。 */
+function pruneReasoning(snapshot: BridgeStatusSnapshot, mode: StatusReasoning): BridgeStatusSnapshot {
+  if (mode === 'tail') return snapshot
+  const rest: BridgeStatusSnapshot = { ...snapshot }
+  delete (rest as { reasoningTail?: unknown }).reasoningTail
+  if (mode === 'none') {
+    delete (rest as { lastReasoning?: unknown }).lastReasoning
+    delete (rest as { liveReasoning?: unknown }).liveReasoning
+  } else if (mode === 'last') {
+    delete (rest as { liveReasoning?: unknown }).liveReasoning
+  } else { // 'live'
+    delete (rest as { lastReasoning?: unknown }).lastReasoning
+  }
+  return rest
+}
+
+/** 渲染监控快照为一行摘要：运行态 + openTurn + 卡住/待处理 + 最新回复(+ 思维链预览)。 */
 function renderStatus(snapshot: BridgeStatusSnapshot, stalledMsThreshold: number): string[] {
   const lines: string[] = []
   const runLabel = snapshot.running === 'running' ? 'running' : 'idle'
@@ -831,17 +961,22 @@ function renderStatus(snapshot: BridgeStatusSnapshot, stalledMsThreshold: number
   }
   if (snapshot.pendingWork) lines.push(`pendingWork: ${snapshot.nextTurnCount} turn + ${snapshot.nextStepCount} step`)
   if (snapshot.lastAssistantText !== undefined) lines.push(`lastReply: ${snapshot.lastAssistantText}`)
+  if (snapshot.reasoningTail !== undefined && snapshot.reasoningTail !== '') {
+    const preview = snapshot.reasoningTail.length > 160 ? snapshot.reasoningTail.slice(0, 160) + '…' : snapshot.reasoningTail
+    lines.push(`reasoning: ${preview}`)
+  }
   return lines
 }
 
 function registerStatus(env: BridgeEnv): void {
   env.ctx.tools.register(defineTool({
     name: 'session_bridge_status',
-    description: 'Inspect a session\'s live progress for monitoring/scheduling. Returns running/idle, whether a turn is open, last turn number, time since the last event (for stall detection), pending queued work, and the latest text reply. When stalledMsThreshold is given, marks the session as stalled when the time since the last event exceeds it. Pass sessionId of a live session (use session_bridge_find to locate; session_bridge_resume to bring an offline one online). Use this as the "observe" step of a monitor→decide→steer/cancel loop.',
+    description: 'Inspect a session\'s live progress for monitoring/scheduling. Returns running/idle, whether a turn is open, last turn number, time since the last event (for stall detection), pending queued work, and the latest text reply. It also surfaces the session\'s chain-of-thought: lastReasoning is the most recent finalized reasoning block, liveReasoning is the in-flight reasoning streamed for the current handled turn (reasoning-delta), and reasoningTail is a compact merged preview. reasoning=none drops all three to keep tokens small. When stalledMsThreshold is given, marks the session as stalled when the time since the last event exceeds it. Pass sessionId of a live session (use session_bridge_find to locate; session_bridge_resume to bring an offline one online). Use this as the "observe" step of a monitor→decide→steer/cancel loop.',
     parameters: {
       sessionId: { type: 'string', required: true, description: 'Session id to inspect (must be live).' },
       stalledMsThreshold: { type: 'number', description: 'Mark the session STALLED when time since the last event exceeds this many ms (default 60000).' },
       recent: { type: 'number', description: 'Number of recent messages to include in the snapshot (default 8, max 20).' },
+      reasoning: { type: 'string', enum: ['none', 'last', 'live', 'tail'], description: 'Which chain-of-thought fields to include: tail (default) returns lastReasoning/liveReasoning/reasoningTail; last only the finalized reasoning; live only the in-flight reasoning; none drops all reasoning fields.' },
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
@@ -860,7 +995,8 @@ function registerStatus(env: BridgeEnv): void {
         throw new Error('session ' + JSON.stringify(args.sessionId) + ' is not live — call session_bridge_resume first (status requires a live session)')
       }
       const threshold = typeof args.stalledMsThreshold === 'number' && Number.isFinite(args.stalledMsThreshold) && args.stalledMsThreshold >= 0 ? args.stalledMsThreshold : 60000
-      const snapshot = statusSnapshot(env.ctx, agent)
+      const reasoningMode: StatusReasoning = args.reasoning === 'none' || args.reasoning === 'last' || args.reasoning === 'live' ? args.reasoning : 'tail'
+      const snapshot = pruneReasoning(statusSnapshot(env.ctx, agent), reasoningMode)
       const shown = typeof args.recent === 'number' && Number.isInteger(args.recent) && args.recent >= 0 ? Math.min(args.recent, 20) : 8
       const envCwd = agent.session.header.cwd
       env.registry.touch(args.sessionId, {

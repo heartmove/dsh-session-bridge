@@ -40,6 +40,32 @@ export interface MonitorConfig {
   logFile?: string
   /** 监控会话的说明，仅用于展示。 */
   label?: string
+  /** 思维链（CoT）规则：对实时推理/文本做 contains/not-contains 匹配，持续命中达 cotMinHits 后触发 steer 或 cancel。 */
+  coTRules?: CoTRule[]
+  /** 一条规则连续命中多少个 tick 才触发（默认 1 = 立即）。 */
+  cotMinHits?: number
+}
+
+/** 一条思维链规则：匹配实时链的内容并触发动作。 */
+export interface CoTRule {
+  /** contains = 匹配内容必须包含 value；not-contains = 必须不含 value。 */
+  match: 'contains' | 'not-contains'
+  /** 在哪个字段上匹配：reasoning（思维链）/ text（回复文本）/ both（任一）。 */
+  field: 'reasoning' | 'text' | 'both'
+  /** 匹配的关键词（非空）。 */
+  value: string
+  /** 触发动作：cancel 立即终止会话；steer 注入一条用户消息引导。 */
+  action: 'steer' | 'cancel'
+  /** steer 时的注入文案（缺省用默认催办文案）。 */
+  message?: string
+}
+
+/** 一条 CoT 规则的连续命中计数（防单次 tick 误触发 & 防重复触发）。 */
+export interface CoTRuleState {
+  hits: number
+  lastFiredAt: number | null
+  lastMatch: boolean
+  lastSubject: string
 }
 
 export interface MonitorEntryState {
@@ -47,11 +73,14 @@ export interface MonitorEntryState {
   startedAt: number
   lastTickAt: number
   stuckCount: number
-  lastAction: 'none' | 'steer' | 'cancel' | 'done' | 'lost' | 'offtrack' | 'steady'
+  lastAction: 'none' | 'steer' | 'cancel' | 'done' | 'lost' | 'offtrack' | 'steady' | 'cot-steer' | 'cot-cancel'
   lastActionAt: number | null
   lastNote: string
   done: boolean
   cycles: number
+  cot: {
+    rules: { [key: string]: CoTRuleState }
+  }
 }
 
 const SCAN_MS = 5000
@@ -77,6 +106,13 @@ export class SessionMonitor {
   start(config: MonitorConfig): MonitorEntryState {
     const existing = this.entries.get(config.sessionId)
     const now = Date.now()
+    const cotInit: MonitorEntryState['cot'] = {
+      rules: (config.coTRules ?? []).reduce<Record<string, CoTRuleState>>((acc, rule, index) => {
+        const key = String(index) + ':' + rule.match + ':' + rule.field + ':' + rule.value
+        acc[key] = { hits: 0, lastFiredAt: null, lastMatch: false, lastSubject: '' }
+        return acc
+      }, {}),
+    }
     const entry: MonitorEntryState = existing !== undefined
       ? { ...existing, config, lastTickAt: now }
       : {
@@ -89,7 +125,9 @@ export class SessionMonitor {
         lastNote: '监控已启动',
         done: false,
         cycles: 0,
+        cot: cotInit,
       }
+    if (entry.cot === undefined) entry.cot = cotInit
     this.entries.set(config.sessionId, entry)
     this.ensureTimer()
     this.log(entry, 'monitor start session=' + config.sessionId + ' interval=' + config.intervalMs
@@ -232,6 +270,11 @@ export class SessionMonitor {
       return
     }
 
+    // 4b) 思维链（CoT）规则检查：对实时推理/文本做匹配，持续命中则 steer/cancel。
+    // 与卡住逻辑正交：即使会话在推进，只要思维链不符合规则也可提前终止/纠偏。
+    const cotHandled = this.evaluateCoTRules(entry, snapshot, sessionId)
+    if (cotHandled) return
+
     // 5) 正常推进：重置卡住计数。
     if (entry.stuckCount !== 0) entry.stuckCount = 0
     entry.lastAction = 'steady'
@@ -260,6 +303,88 @@ export class SessionMonitor {
     const text = `${snapshot.lastAssistantText ?? ''}\n${snapshot.recent.map((r) => r.text ?? '').join('\n')}`
     if (!text) return false
     return keywords.some((kw) => kw !== '' && text.includes(kw))
+  }
+
+  /**
+   * 评估思维链（CoT）规则。规则只对 live 会话有意义：running 时用进行中的
+   * reasoning-delta 流，空闲时回落到已定型 lastReasoning。not-contains 规则作用在
+   * reasoning 字段时，若该会话本就没有推理（非推理模型/尚未产出），不判定为命中，
+   * 避免误 cancel 一个根本不产生思维链的会话。
+   * @returns true 表示本 tick 已被某条规则触发并处理（steer/cancel），调用方应 return。
+   */
+  private evaluateCoTRules(entry: MonitorEntryState, snapshot: BridgeStatusSnapshot, sessionId: string): boolean {
+    const rules = entry.config.coTRules ?? []
+    if (rules.length === 0) return false
+    const minHits = entry.config.cotMinHits ?? 1
+
+    // 评估主体：进行中的实时推理/文本，否则已定型的上次推理/回复。
+    const hasLive = (snapshot.liveReasoning ?? '') !== ''
+    const subject = {
+      reasoning: snapshot.liveReasoning ?? snapshot.lastReasoning ?? '',
+      text: snapshot.lastAssistantText ?? '',
+      hasReasoning: hasLive || (snapshot.lastReasoning ?? '') !== '',
+    }
+
+    const now = Date.now()
+    const rulesState = entry.cot
+    let engaged = false
+    rules.forEach((rule, index) => {
+      if (engaged) return
+      const key = String(index) + ':' + rule.match + ':' + rule.field + ':' + rule.value
+      const st = rulesState.rules[key] ?? { hits: 0, lastFiredAt: null, lastMatch: false }
+
+      // not-contains 作用在 reasoning 且本就没有推理时：不算命中。
+      if (rule.field === 'reasoning' && rule.match === 'not-contains' && !subject.hasReasoning) {
+        st.lastMatch = false
+        st.hits = 0
+        return
+      }
+
+      let hit: boolean
+      if (rule.field === 'reasoning') {
+        hit = rule.match === 'contains' ? subject.reasoning.includes(rule.value) : !subject.reasoning.includes(rule.value)
+      } else if (rule.field === 'text') {
+        hit = rule.match === 'contains' ? subject.text.includes(rule.value) : !subject.text.includes(rule.value)
+      } else { // 'both'
+        const reasonHas = subject.reasoning.includes(rule.value)
+        const textHas = subject.text.includes(rule.value)
+        hit = rule.match === 'contains' ? (reasonHas || textHas) : (!reasonHas && !textHas)
+      }
+
+      st.lastMatch = hit
+      st.hits = hit ? st.hits + 1 : 0
+      this.log(entry, 'CoT rule ' + key + ' hit=' + String(hit) + ' hits=' + String(st.hits) + '/' + String(minHits))
+
+      const shouldFire = hit && st.hits >= minHits
+      if (!shouldFire) return
+      // 冷却：同一规则在冷却窗口内不重复触发（除非匹配状态先复位再命中）。
+      const coolMs = Math.max(entry.config.intervalMs, 5000) * 2
+      if (st.lastFiredAt !== null && now - st.lastFiredAt < coolMs) return
+
+      st.lastFiredAt = now
+      if (rule.action === 'cancel') {
+        const reason = 'reasoning-rule:' + rule.value
+        cancelLiveSession(this.ctx, sessionId, false, reason)
+        entry.lastAction = 'cot-cancel'
+        entry.lastActionAt = Date.now()
+        entry.lastNote = '思维链规则触发 cancel: ' + rule.value
+        entry.stuckCount = 0
+        this.log(entry, 'COT-CANCEL session=' + sessionId + ' rule=' + key + ' value=' + rule.value)
+      } else {
+        const steer = rule.message !== undefined && rule.message.trim() !== ''
+          ? rule.message.trim()
+          : '监控判定：思维链/回复匹配规则「' + rule.value + '」，请据此调整方向并继续推进任务。'
+        sendLiveMessage(this.ctx, sessionId, steer, 'steer')
+        entry.lastAction = 'cot-steer'
+        entry.lastActionAt = Date.now()
+        entry.lastNote = '思维链规则触发 steer: ' + rule.value
+        entry.stuckCount = 0
+        this.log(entry, 'COT-STEER session=' + sessionId + ' rule=' + key + ' steer=' + steer)
+      }
+      engaged = true
+      st.hits = 0
+    })
+    return engaged
   }
 
   private hasLlm(): boolean {

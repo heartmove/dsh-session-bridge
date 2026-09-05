@@ -108,6 +108,19 @@ function blockText(content: unknown): string | undefined {
   return parts.length === 0 ? undefined : parts.join('\n')
 }
 
+/** 提取指定类型的 content block 文本（如 reasoning），用于从消息 content 里读出思维链。 */
+function blockTextByType(content: unknown, wantedType: string): string | undefined {
+  if (!Array.isArray(content)) return undefined
+  const parts: string[] = []
+  for (const raw of content) {
+    const block = raw as { type?: unknown; text?: unknown } | null
+    if (block !== null && typeof block === 'object' && block.type === wantedType && typeof block.text === 'string') {
+      if (block.text !== '') parts.push(block.text)
+    }
+  }
+  return parts.length === 0 ? undefined : parts.join('\n')
+}
+
 function countImages(content: unknown): number {
   if (!Array.isArray(content)) return 0
   let n = 0
@@ -142,7 +155,9 @@ export function foldMessages(events: readonly SessionEvent[]): BridgeMessageRow[
     } else if (event.type === 'assistant/message') {
       const message = event.data.message as { content?: unknown; reasoning?: unknown; toolCalls?: unknown } | null
       const text = message === null ? undefined : blockText(message.content)
-      const reasoning = message === null ? undefined : blockText(message.reasoning)
+      // 思维链是 content 里 type:'reasoning' 的块；老版本曾把取舍放在 message.reasoning 字段，
+      // 两者都读，优先 content 块（当前 dsh-llm 的 AssistantMessage 无独立 reasoning 字段）。
+      const reasoning = message === null ? undefined : (blockTextByType(message.content, 'reasoning') ?? blockText(message.reasoning))
       const images = message === null ? 0 : countImages(message.content)
       const toolCalls = message === null ? [] : toolNamesOf(message.toolCalls)
       if (text === undefined && reasoning === undefined && toolCalls.length === 0) continue
@@ -154,6 +169,133 @@ export function foldMessages(events: readonly SessionEvent[]): BridgeMessageRow[
     }
   }
   return rows
+}
+
+/** 一个已完成的输出段落：一次 assistant step 定型的 assistant/message（turn 中途即可读，无需等整个 turn）。 */
+export interface BridgeSegment {
+  seq: number
+  time: number
+  turn: number
+  step: number
+  text?: string
+  reasoning?: string
+  toolCalls: string[]
+  openTurn: boolean
+}
+
+/** 按已完成输出段落折叠事件日志：每个 assistant/message 割一段，返回 sinceSeq 后的所有段落（事件序）。 */
+export function segmentsSince(events: readonly SessionEvent[], sinceSeq = 0): BridgeSegment[] {
+  const list = asEventList(events)
+  const out: BridgeSegment[] = []
+  let openTurn = false
+  for (const event of list) {
+    if (event.type === 'turn/start') { openTurn = true; continue }
+    if (event.type === 'turn/end') { openTurn = false; continue }
+    if (event.type !== 'assistant/message') continue
+    if (event.seq <= sinceSeq) continue
+    const message = event.data.message as { content?: unknown; reasoning?: unknown; toolCalls?: unknown } | null
+    const text = message === null ? undefined : blockText(message.content)
+    const reasoning = message === null ? undefined : (blockTextByType(message.content, 'reasoning') ?? blockText(message.reasoning))
+    const toolCalls = message === null ? [] : toolNamesOf(message.toolCalls)
+    const turn = (event.data as { turn?: unknown })?.turn
+    const step = (event.data as { step?: unknown })?.step
+    const seg: BridgeSegment = {
+      seq: event.seq,
+      time: event.time,
+      turn: typeof turn === 'number' ? turn : 0,
+      step: typeof step === 'number' ? step : 0,
+      toolCalls,
+      openTurn,
+    }
+    if (text !== undefined) seg.text = text
+    if (reasoning !== undefined) seg.reasoning = reasoning
+    out.push(seg)
+  }
+  return out
+}
+
+/** 取自 sinceSeq 之后最新一个已完成输出段落（无则 null）。 */
+export function latestSegmentSince(events: readonly SessionEvent[], sinceSeq = 0): BridgeSegment | null {
+  const segs = segmentsSince(events, sinceSeq)
+  return segs.length === 0 ? null : (segs[segs.length - 1] ?? null)
+}
+
+/** 实时思维链切片：一个 live 会话当前"进行中"的增量推理与文本。 */
+export interface CoTLiveSlice {
+  /** 产生该推理的 turn。 */
+  turn: number
+  /** 产生该推理的 step。 */
+  step: number
+  /** 自最近一条已定型 assistant 消息以来累积的进行中推理文本（reasoning-delta 拼接）。 */
+  reasoning: string
+  /** 同窗口累积的进行中文本增量（text-delta 拼接）。 */
+  text: string
+  /** 本切片覆盖到的最大事件 seq（供增量轮询记住游标）。 */
+  seq: number
+  /** 最近一次事件时间戳。 */
+  time: number
+}
+
+/**
+ * 对一个 live 会话的事件日志折叠出其"实时思维链"：
+ * - 优先聚合流式 assistant/chunk 事件里的 reasoning-delta（turn 中途即可见、增量，
+ *   这正是监控思维链并按规则提前终止所需的粒度）；
+ * - 同时聚合同窗口的 text-delta 增量；
+ * - 若没有进行中的 chunk（会话空闲、或该 provider 不流式推理/无推理），返回 null，
+ *   调用方应回落为 foldMessages 里的已定型 message.reasoning。
+ * 纯读、无副作用；事件形状不做任何假设，缺失/异常一律安全处理。
+ */
+export function liveReasoningSnapshot(events: readonly SessionEvent[]): CoTLiveSlice | null {
+  const list = asEventList(events)
+  // 只累积"最近一条已定型 assistant/message 之后"的流式增量（当前 in-flight 窗口），
+  // 避免把历史每一轮的思维链都拼接进来。turn/step 记录窗口内最近的 chunk 归属。
+  let lastFinalizedSeq = -1
+  let reasoning = ''
+  let text = ''
+  let seq = -1
+  let time = 0
+  let turn = 0
+  let step = 0
+  let foundDelta = false
+  for (const event of list) {
+    if (event.type === 'assistant/message') {
+      lastFinalizedSeq = event.seq
+      continue
+    }
+    if (event.type !== 'assistant/chunk') continue
+    if (event.seq <= lastFinalizedSeq) continue
+    const data = event.data as { turn?: unknown; step?: unknown; chunk?: unknown } | null | undefined
+    if (data === null || data === undefined || typeof data !== 'object') continue
+    const c = data.chunk as { type?: unknown; text?: unknown } | null
+    if (c === null || typeof c !== 'object' || typeof c.type !== 'string') continue
+    if (c.type === 'reasoning-delta' || c.type === 'text-delta') {
+      if (typeof c.text !== 'string') continue
+      if (c.type === 'reasoning-delta') reasoning += c.text
+      else text += c.text
+      if (typeof data.turn === 'number') turn = data.turn
+      if (typeof data.step === 'number') step = data.step
+      foundDelta = true
+      if (event.seq > seq) seq = event.seq
+      if (event.time > time) time = event.time
+    }
+  }
+  if (!foundDelta) return null
+  return { turn, step, reasoning, text, seq, time }
+}
+
+/** 思维链尾巴默认截断上限（字符）。 */
+export const REASONING_TAIL_LIMIT = 4000
+
+/**
+ * 组装一条受字符上限约束的"思维链尾巴"用于展示/摘要：
+ * 优先进行中的 liveReasoning，否则最近已定型的 lastReasoning；
+ * 超出上限时截断并附省略标记。两者皆无返回 undefined。
+ */
+export function reasoningTailOf(liveReasoning: string | undefined, lastReasoning: string | undefined, limit = REASONING_TAIL_LIMIT): string | undefined {
+  const source = liveReasoning ?? lastReasoning
+  if (source === undefined || source === '') return undefined
+  if (source.length <= limit) return source
+  return source.slice(0, limit) + '…'
 }
 
 /**
@@ -203,6 +345,8 @@ export interface WaitForReplyOptions {
   timeoutMs: number
   signal?: AbortSignal
   requireTurnEnd?: boolean
+  /** true 时等待到 baseline 之后出现一个“新完成的输出段落”（assistant/message），立即返回该段，不等整个 turn。 */
+  waitForSegment?: boolean
 }
 
 /**
@@ -221,8 +365,10 @@ export async function waitForReply(opts: WaitForReplyOptions): Promise<BridgeWai
   const started = Date.now()
   const deadline = started + opts.timeoutMs
   const requireTurnEnd = opts.requireTurnEnd ?? false
+  const waitForSegment = opts.waitForSegment ?? false
   let latest: BridgeMessageRow | null = null
   let textReply: BridgeMessageRow | null = null
+  let segment: BridgeSegment | null = null
   let turnEnded = false
   for (;;) {
     if (opts.signal !== undefined && opts.signal.aborted) break
@@ -232,22 +378,35 @@ export async function waitForReply(opts: WaitForReplyOptions): Promise<BridgeWai
       if (latest === null || row.seq > latest.seq) latest = row
       if (row.text !== undefined && (textReply === null || row.seq > textReply.seq)) textReply = row
     }
+    if (waitForSegment) {
+      const seg = latestSegmentSince(events, opts.baselineSeq)
+      if (seg !== null && (segment === null || seg.seq > segment.seq)) segment = seg
+    }
     if (requireTurnEnd && latest !== null) {
       for (const event of events) {
         if (event.seq > latest.seq && event.type === 'turn/end') { turnEnded = true; break }
       }
     }
-    const done = requireTurnEnd ? (latest !== null && turnEnded) : textReply !== null
+    let done: boolean
+    if (requireTurnEnd) done = latest !== null && turnEnded
+    else if (waitForSegment) done = segment !== null
+    else done = textReply !== null
     if (done) break
     if (Date.now() >= deadline) break
     await sleep(100)
   }
-  const message = textReply ?? latest
+  // 段落模式返回该段（把 reasoning 并进返回行，便于“按段落读思维链”）；否则返回最新文本行。
+  let message: BridgeMessageRow | null = waitForSegment && segment !== null ? {
+    seq: segment.seq, time: segment.time, role: 'assistant', images: 0,
+    ...(segment.text !== undefined ? { text: segment.text } : {}),
+    ...(segment.reasoning !== undefined ? { reasoning: segment.reasoning } : {}),
+    ...(segment.toolCalls.length > 0 ? { toolCalls: segment.toolCalls } : {}),
+  } : (textReply ?? latest)
   return {
     message,
     seq: message === null ? opts.baselineSeq : message.seq,
     turnEnded,
-    timedOut: requireTurnEnd ? (latest !== null && !turnEnded) : textReply === null,
+    timedOut: requireTurnEnd ? (latest !== null && !turnEnded) : waitForSegment ? segment === null : textReply === null,
     aborted: opts.signal !== undefined && opts.signal.aborted,
     waitedMs: Date.now() - started,
   }
@@ -342,6 +501,12 @@ export interface BridgeStatusSnapshot {
   nextStepCount: number
   /** 最新一条带文本的 assistant 回复。 */
   lastAssistantText?: string
+  /** 最新一条已定型 assistant 消息的推理（reasoning content block）。 */
+  lastReasoning?: string
+  /** 进行中的实时思维链增量（reasoning-delta 拼接；无进行中流时为 undefined）。 */
+  liveReasoning?: string
+  /** 极紧凑的思维链尾巴：liveReasoning 优先、否则 lastReasoning，截断至 reasoningTailLimit。 */
+  reasoningTail?: string
   /** 折叠后的消息总数。 */
   messageCount: number
   /** 最近几条消息（默认 8）。 */
@@ -369,13 +534,18 @@ export function statusSnapshot(ctx: Context, agent: LiveAgentLike): BridgeStatus
   }
   const recent = rows.slice(-8)
   let lastAssistantText: string | undefined
+  let lastReasoning: string | undefined
   for (let i = rows.length - 1; i >= 0; i -= 1) {
     const row = rows[i]
-    if (row !== undefined && row.role === 'assistant' && row.text !== undefined) {
-      lastAssistantText = row.text
-      break
+    if (row !== undefined && row.role === 'assistant') {
+      if (lastAssistantText === undefined && row.text !== undefined) lastAssistantText = row.text
+      if (lastReasoning === undefined && row.reasoning !== undefined) lastReasoning = row.reasoning
+      if (lastAssistantText !== undefined && lastReasoning !== undefined) break
     }
   }
+  const live = liveReasoningSnapshot(events)
+  const liveReasoning = live !== null && live.reasoning !== '' ? live.reasoning : undefined
+  const reasoningTail = reasoningTailOf(liveReasoning, lastReasoning)
   const inbox = agent.inbox
   const cwd = agent.session.header.cwd
   return {
@@ -393,6 +563,9 @@ export function statusSnapshot(ctx: Context, agent: LiveAgentLike): BridgeStatus
     nextTurnCount: inbox?.nextTurn?.length ?? 0,
     nextStepCount: inbox?.nextStep?.length ?? 0,
     ...(lastAssistantText === undefined ? {} : { lastAssistantText }),
+    ...(lastReasoning === undefined ? {} : { lastReasoning }),
+    ...(liveReasoning === undefined ? {} : { liveReasoning }),
+    ...(reasoningTail === undefined ? {} : { reasoningTail }),
     messageCount: rows.length,
     recent,
   }

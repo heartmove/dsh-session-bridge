@@ -14,10 +14,17 @@
   reasoning effort 默认继承调用会话。
 - **向任意会话发消息。** `session_bridge_send` 追加一轮（`mode=queue`）或向运行中的步骤注入
   steering（`mode=steer`），可选等待下一条回复。
-- **等待回复。** `session_bridge_wait` 阻塞直至 `sinceSeq` 之后出现新的带文本 assistant 回复；
-  开 `requireTurnEnd` 则同时等待回合收尾。超时 / 中止返回部分结果，而非抛错。
+- **等待回复或段落。** `session_bridge_wait` 阻塞直至 `sinceSeq` 之后出现新的 assistant 输出：
+  `waitFor=reply`（默认）在有新的**文本**回复可读时立即返回；`waitFor=segment` 在任意新**已完成
+  输出步骤**出现时立即返回（一个 `assistant/message`——文本、推理或工具调用段），*无需*等整个
+  turn 结束，从而可以按段落逐段观察输出。开 `requireTurnEnd` 则同时等待回合收尾。
+  超时 / 中止返回部分结果，而非抛错。
 - **读取任意会话。** `session_bridge_read` 把会话事件日志折叠为可读行——live 或离线（持久化）均可；
   支持 `sinceSeq` 分页、role 过滤、`limit`（默认 20，最大 100）。
+- **按段落读取输出。** `session_bridge_segments` 返回会话的**已完成输出段落**——每个已完成的
+  assistant 步骤（一个 `assistant/message`：其文本、推理与请求的工具调用）作为一行，用 `sinceSeq`
+  增量翻页并返回下一游标。live 或离线均可用，*无需*等整个 turn 结束，因此可以逐步跟踪长 agentic
+  任务（模型流式推理时，段落中一并包含思维链）。
 - **恢复离线会话。** `session_bridge_resume` 让持久化会话重新上线（幂等），可覆盖 provider / model。
 - **查找会话。** `session_bridge_find` 跨全部工作区按 标题 / id / workspace / 目录 匹配，返回
   live/running 状态、标题、工作目录；bridge 登记的标题作为别名参与匹配。
@@ -45,6 +52,28 @@
 `~/.dsh/super-injector/dsh-session-bridge-monitor.log`（可用 `logFile` 覆盖）。
 
 用 `session_bridge_monitor_start` / `_stop` / `_list` 控制。
+
+### 思维链（CoT）监控与规则
+
+会话桥可以**实时监控**另一个会话的思维链（chain-of-thought / reasoning），而不只等它的最终回复：
+
+- **实时观察**：`session_bridge_status` 对运行中会话返回三块思维链字段——`lastReasoning`
+  （最近一条已定型推理块）、`liveReasoning`（当前正在处理的 turn 的进行中推理，来自
+  `assistant/chunk` 的 `reasoning-delta` 流）、`reasoningTail`（紧凑、受字符上限的合并预览）。
+  用 `reasoning` 参数（`none | last | live | tail`）选择返回哪些字段，默认 `tail` 最省 token。
+- **按段落读取**：`session_bridge_segments` 把每个已完成输出步骤（一个 `assistant/message`——文本、推理或工具调用段）当作一个段落返回，用 `sinceSeq` 增量翻页，无需等整个 turn。
+- **按消息读取**：`session_bridge_read` 带 `includeReasoning` 可返回每条 assistant 消息的已定型推理。
+- **规则执行**：`session_bridge_monitor_start` 接受 `coRules`（数组，元素为 { match:
+  contains|not-contains, field: reasoning|text|both, value: string, action: steer|cancel,
+  message?: string }）与 `cotMinHits`。每次轮询守护用规则的匹配条件对照实时思维链/文本，
+  连续命中 `cotMinHits` 次（默认 1）后触发动作：`steer` 注入引导性用户消息，`cancel` 终止会话。
+  示例——"思维链一旦不再包含 I'm 就停止该会话"：
+
+      coRules: [{ "match": "not-contains", "field": "reasoning", "value": "I'm", "action": "cancel" }]
+
+  注意：作用在 `reasoning` 上的 `not-contains` 规则在目标会话**完全不产生推理**时故意不触发
+  （如非推理模型或 reasoningEffort off），避免误 cancel 根本不流式思维链的会话。重复触发有冷却
+  节流，每次评估/触发都会写入监控日志。
 
 ## 环境要求
 
@@ -151,13 +180,14 @@ dev_inject_plugin D:\code\dsh-session-bridge
 |---|---|
 | `session_bridge_create` | 创建主会话（当前或其它工作区，经 `workspaceId` / `cwd`）；可选首条 prompt + `waitForReply`。 |
 | `session_bridge_send` | 发消息（`mode=queue`/`steer`）；可选等待回复。 |
-| `session_bridge_wait` | 等待 `sinceSeq` 之后新的带文本 assistant 回复；可选 `requireTurnEnd`。 |
+| `session_bridge_wait` | 等待 `sinceSeq` 之后新输出：`waitFor=reply`（文本）或 `waitFor=segment`（任一已完成步骤即返回，无需等整个 turn）；可选 `requireTurnEnd`。 |
 | `session_bridge_read` | 读取消息 —— live 或离线；`sinceSeq` 分页、`role` 过滤、`limit`。 |
+| `session_bridge_segments` | 增量读取已完成输出段落（每个已完成的 assistant 步骤）—— live 或离线。 |
 | `session_bridge_resume` | 让持久化会话重新上线（幂等）。 |
 | `session_bridge_find` | 跨工作区按 标题 / id / workspace / 目录 查找会话。 |
-| `session_bridge_status` | 读取会话实时进度（running、openTurn、卡住检测、待处理、最新回复）。 |
+| `session_bridge_status` | 读取会话实时进度（running、openTurn、卡住检测、待处理、最新回复）及实时/已定型思维链（`reasoning` 参数）。 |
 | `session_bridge_cancel` | 停止运行中的会话（中止活动 turn；`keepInbox` 保留排队/steering 输入）。 |
-| `session_bridge_monitor_start` | 对一个主会话启动后台守护（轮询、催办、纠偏、终止、收尾）。 |
+| `session_bridge_monitor_start` | 对一个主会话启动后台守护（轮询、催办、纠偏、终止、收尾）；支持思维链 `coRules`（如 reasoning not-contains "I'm" → cancel）。 |
 | `session_bridge_monitor_stop` | 停止守护（会话本身不终止）。 |
 | `session_bridge_monitor_list` | 列出活动守护及其状态。 |
 | `session_bridge_archive` | 归档会话（从分组隐藏；历史与位置保留）。 |

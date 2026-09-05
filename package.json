@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-bridge",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "会话桥（dsh-session-bridge）：通过提示词创建新的主会话（顶层 UI 会话）、向任意会话发送消息、等待会话的下一条回复、读取会话消息，并按会话名或 id 跨工作区查找会话；此外支持监控/调度主任务与归档会话。",
   "private": false,
   "type": "module",
