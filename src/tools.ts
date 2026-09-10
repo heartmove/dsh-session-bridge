@@ -7,7 +7,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type {} from '@deepseek-ai/dsh-agent-presets'
-import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import * as agentApi from '@deepseek-ai/dsh-agent'
 import type {
   BridgeFindItem,
@@ -15,11 +15,11 @@ import type {
   BridgeStatusSnapshot,
   BridgeWaitResult,
   LiveAgentLike,
-  WaitForReplyOptions,
 } from './core.ts'
 import {
   attachSessionToWorkspace,
   foldMessages,
+  inspectPersistedSession,
   maxSeq,
   resolveTargetCwd,
   segmentsSince,
@@ -102,10 +102,10 @@ interface WaitArgs {
   timeoutMs?: number
 }
 
-async function maybeWait(env: BridgeEnv, session: { events: readonly SessionEvent[] }, baselineSeq: number, args: WaitArgs, signal: AbortSignal): Promise<ReturnType<typeof renderWait> | undefined> {
+async function maybeWait(env: BridgeEnv, session: Session, baselineSeq: number, args: WaitArgs, signal: AbortSignal): Promise<ReturnType<typeof renderWait> | undefined> {
   if (args.waitForReply !== true) return undefined
   const result = await waitForReply({
-    session: session as WaitForReplyOptions['session'],
+    session,
     baselineSeq,
     timeoutMs: clampTimeout(args.timeoutMs),
     signal,
@@ -354,8 +354,13 @@ function registerResume(env: BridgeEnv): void {
       }
       let headers: readonly { id: string; cwd?: string; createdAt: number }[] = []
       try {
-        const persistence = env.ctx.sessionPersistence as unknown as { list(): Promise<readonly { id: string; cwd?: string; createdAt: number }[]> }
-        headers = await persistence.list()
+        // dsh >= 0.1.5-alpha.1：list() 返回 { header, ... } 快照；映射回平铺字段。
+        const persistence = env.ctx.sessionPersistence as unknown as { list(): Promise<readonly { header: { id: string; cwd?: string; createdAt: number } }[]> }
+        headers = (await persistence.list()).map((rec) => ({
+          id: rec.header.id,
+          ...(rec.header.cwd === undefined ? {} : { cwd: rec.header.cwd }),
+          createdAt: rec.header.createdAt,
+        }))
       } catch (error) {
         throw new Error('session persistence unavailable: ' + (error instanceof Error ? error.message : String(error)))
       }
@@ -502,8 +507,7 @@ function registerSegments(env: BridgeEnv): void {
         live = true
       } else {
         try {
-          const persistence = env.ctx.sessionPersistence as unknown as { inspect(id: string): Promise<{ events: readonly SessionEvent[] }> }
-          const inspection = await persistence.inspect(args.sessionId)
+          const inspection = await inspectPersistedSession(env.ctx, args.sessionId)
           events = inspection.events
           live = false
         } catch (error) {
@@ -580,8 +584,7 @@ function registerRead(env: BridgeEnv): void {
       } else {
         let inspection: { events: readonly SessionEvent[]; meta: { cwd?: string } }
         try {
-          const persistence = env.ctx.sessionPersistence as unknown as { inspect(id: string): Promise<{ events: readonly SessionEvent[]; meta: { cwd?: string } }> }
-          inspection = await persistence.inspect(args.sessionId)
+          inspection = await inspectPersistedSession(env.ctx, args.sessionId)
         } catch (error) {
           throw new Error('cannot read session ' + JSON.stringify(args.sessionId) + ': ' + (error instanceof Error ? error.message : String(error)))
         }
@@ -685,8 +688,11 @@ function registerFind(env: BridgeEnv): void {
       }
       if (args.liveOnly !== true) {
         try {
-          const persistence = env.ctx.sessionPersistence as unknown as { list(): Promise<readonly { id: string; cwd?: string; parentSession?: string; origin?: 'subagent'; createdAt: number; agentPreset?: string }[]> }
-          for (const header of await persistence.list()) {
+          // dsh >= 0.1.5-alpha.1：list() 返回 { header: SessionHeader, revision, ... } 快照，
+          // 不再平铺 id/cwd；旧版直接返回 header 平铺字段。两者都按新形状读，向下兼容。
+          const persistence = env.ctx.sessionPersistence as unknown as { list(): Promise<readonly { header: { id: string; cwd?: string; parentSession?: string; origin?: 'subagent'; createdAt: number; agentPreset?: string } }[]> }
+          for (const rec of await persistence.list()) {
+            const header = rec.header
             if (items.some((item) => item.sessionId === header.id)) continue
             items.push({
               sessionId: header.id,
@@ -720,13 +726,12 @@ function registerFind(env: BridgeEnv): void {
       const cwdFilter = typeof args.cwd === 'string' ? args.cwd.trim().toLowerCase() : ''
       const needsOfflineTitle = titleFilter !== '' || (query !== '' && items.some((item) => !item.live))
       if (needsOfflineTitle) {
-        const persistence = env.ctx.sessionPersistence as unknown as { inspect(id: string): Promise<{ events: readonly SessionEvent[] }> }
         let inspected = 0
         for (const item of items) {
           if (inspected >= 30) break
           if (item.live || item.title !== undefined) continue
           try {
-            const inspection = await persistence.inspect(item.sessionId)
+            const inspection = await inspectPersistedSession(env.ctx, item.sessionId)
             item.title = titleOf(inspection.events)
             inspected += 1
           } catch {
@@ -1118,7 +1123,6 @@ function registerArchive(env: BridgeEnv): void {
       const archived = env.ctx.workspaceRegistry.archivedSessionIds.map(String)
       const items: Array<{ sessionId: string; title?: string }> = archived.map((id) => ({ sessionId: id }))
       if (args.resolveTitles === true && items.length > 0) {
-        const persistence = env.ctx.sessionPersistence as unknown as { inspect(id: string): Promise<{ events: readonly SessionEvent[] }> }
         const registryTitles = new Map<string, string>()
         try {
           const records = await env.registry.all()
@@ -1130,7 +1134,7 @@ function registerArchive(env: BridgeEnv): void {
             continue
           }
           try {
-            const inspection = await persistence.inspect(item.sessionId)
+            const inspection = await inspectPersistedSession(env.ctx, item.sessionId)
             item.title = titleOf(inspection.events)
           } catch { /* offline title unavailable */ }
         }

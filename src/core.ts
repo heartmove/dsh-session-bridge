@@ -21,7 +21,9 @@ export interface LiveAgentLike {
   whenIdle?(): Promise<void>
   readonly ctx: Context
   readonly inbox?: {
-    hasPending: boolean
+    // dsh 0.1.2 及之前：`hasPending` getter；dsh 0.1.5 起已删除，仅有
+    // nextTurn / nextStep 只读数组（Inbox 成为 driver 持有的接口）。
+    hasPending?: boolean
     nextTurn?: readonly unknown[]
     nextStep?: readonly unknown[]
   }
@@ -84,6 +86,34 @@ export function sessionEvents(session: unknown): readonly SessionEvent[] {
 /** 规约任意"事件列表"值为数组（非数组 → []），避免 events is not iterable。 */
 export function asEventList(events: unknown): readonly SessionEvent[] {
   return Array.isArray(events) ? events : []
+}
+
+/**
+ * 读取一个持久化（离线）会话的事件日志与头部元数据。兼容两代 persistence API：
+ * - 旧版：`sessionPersistence.inspect(id)` 直接返回 { events, meta }；
+ * - dsh 0.1.5 之后：`inspect` 已删除，改用 `open(id, 'read')` → `handle.read()`
+ *   （+ `handle.header`），读句柄不抢写所有权，读后必须 close()。
+ * 会话不存在时两个 API 都抛错，调用方按原语义处理。
+ */
+export async function inspectPersistedSession(ctx: Context, id: string): Promise<{ events: readonly SessionEvent[]; meta: { cwd?: string } }> {
+  const persistence = ctx.sessionPersistence as unknown as {
+    inspect?: (sid: string) => Promise<{ events: readonly SessionEvent[]; meta: { cwd?: string } }>
+    open?: (sid: string, access: 'read') => Promise<{
+      header: { cwd?: string }
+      read(): Promise<{ events: readonly SessionEvent[] }>
+      close(): Promise<void>
+    }>
+  }
+  if (typeof persistence.inspect === 'function') {
+    return await persistence.inspect(id)
+  }
+  const handle = await persistence.open!(id, 'read')
+  try {
+    const { events } = await handle.read()
+    return { events, meta: handle.header }
+  } finally {
+    await handle.close()
+  }
 }
 
 /** agent.followup / steer 接受的用户消息值。 */
@@ -237,18 +267,20 @@ export interface CoTLiveSlice {
 }
 
 /**
- * 对一个 live 会话的事件日志折叠出其"实时思维链"：
- * - 优先聚合流式 assistant/chunk 事件里的 reasoning-delta（turn 中途即可见、增量，
- *   这正是监控思维链并按规则提前终止所需的粒度）；
- * - 同时聚合同窗口的 text-delta 增量；
- * - 若没有进行中的 chunk（会话空闲、或该 provider 不流式推理/无推理），返回 null，
- *   调用方应回落为 foldMessages 里的已定型 message.reasoning。
+ * 对一个 live 会话的事件日志折叠出其"最近推理/文本增量流"。兼容两代日志形状：
+ * - dsh 0.1.5 之后：turn 内不再发布独立 chunk 事件，流式增量内嵌在已定型
+ *   assistant/message（或未定型 assistant/attempt）事件的 `stream` 记录里
+ *   （reasoning-chunks / text-chunks 批量段 + 原始 chunk：reasoning-delta / text-delta）；
+ * - 0.1.2-rc 之前：独立的 assistant/chunk 事件（turn 中途即可见、增量，
+ *   这正是旧版监控思维链并按规则提前终止所需的粒度）。
+ * 两者兼读、取最新一份；无任何增量（会话空闲、或该 provider 不流式推理/无推理）
+ * 返回 null，调用方应回落为 foldMessages 里已定型的 message.reasoning。
  * 纯读、无副作用；事件形状不做任何假设，缺失/异常一律安全处理。
  */
 export function liveReasoningSnapshot(events: readonly SessionEvent[]): CoTLiveSlice | null {
   const list = asEventList(events)
-  // 只累积"最近一条已定型 assistant/message 之后"的流式增量（当前 in-flight 窗口），
-  // 避免把历史每一轮的思维链都拼接进来。turn/step 记录窗口内最近的 chunk 归属。
+  // 旧格式只累积"最近一条已定型 assistant/message 之后"的流式增量（in-flight 窗口）；
+  // 新格式的 stream 随定型事件落地，直接以最新携带 stream 的事件为准。
   let lastFinalizedSeq = -1
   let reasoning = ''
   let text = ''
@@ -258,11 +290,42 @@ export function liveReasoningSnapshot(events: readonly SessionEvent[]): CoTLiveS
   let step = 0
   let foundDelta = false
   for (const event of list) {
-    if (event.type === 'assistant/message') {
-      lastFinalizedSeq = event.seq
+    const type = event.type as string
+    if (type === 'assistant/message' || type === 'assistant/attempt') {
+      const data = event.data as { turn?: unknown; step?: unknown; stream?: unknown } | null | undefined
+      if (data !== null && data !== undefined && typeof data === 'object' && Array.isArray(data.stream)) {
+        let r = ''
+        let t = ''
+        for (const raw of data.stream as unknown[]) {
+          const record = raw as { type?: unknown; texts?: unknown; text?: unknown; chunk?: unknown } | null
+          if (record === null || typeof record !== 'object') continue
+          if (record.type === 'reasoning-chunks' && Array.isArray(record.texts)) {
+            for (const s of record.texts as unknown[]) if (typeof s === 'string') r += s
+          } else if (record.type === 'text-chunks' && Array.isArray(record.texts)) {
+            for (const s of record.texts as unknown[]) if (typeof s === 'string') t += s
+          } else if (record.type === 'chunk') {
+            const c = record.chunk as { type?: unknown; text?: unknown } | null
+            if (c !== null && typeof c === 'object' && typeof c.type === 'string' && typeof c.text === 'string') {
+              if (c.type === 'reasoning-delta') r += c.text
+              else if (c.type === 'text-delta') t += c.text
+            }
+          }
+        }
+        if (r !== '' || t !== '') {
+          if (typeof data.turn === 'number') turn = data.turn
+          if (typeof data.step === 'number') step = data.step
+          reasoning = r
+          text = t
+          seq = event.seq
+          time = event.time
+          foundDelta = true
+        }
+      }
+      if (type === 'assistant/message') lastFinalizedSeq = event.seq
       continue
     }
-    if (event.type !== 'assistant/chunk') continue
+    // 旧格式：独立 assistant/chunk 事件。
+    if (type !== 'assistant/chunk') continue
     if (event.seq <= lastFinalizedSeq) continue
     const data = event.data as { turn?: unknown; step?: unknown; chunk?: unknown } | null | undefined
     if (data === null || data === undefined || typeof data !== 'object') continue
@@ -559,7 +622,8 @@ export function statusSnapshot(ctx: Context, agent: LiveAgentLike): BridgeStatus
     lastTurn,
     lastActivityAt,
     stalledMs: lastActivityAt === null ? null : Date.now() - lastActivityAt,
-    pendingWork: inbox?.hasPending ?? false,
+    // 双兼容：0.1.2 用 hasPending getter；0.1.5 起只有 nextTurn/nextStep 数组。
+    pendingWork: inbox?.hasPending === true || (inbox?.nextTurn?.length ?? 0) + (inbox?.nextStep?.length ?? 0) > 0,
     nextTurnCount: inbox?.nextTurn?.length ?? 0,
     nextStepCount: inbox?.nextStep?.length ?? 0,
     ...(lastAssistantText === undefined ? {} : { lastAssistantText }),
