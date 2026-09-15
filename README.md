@@ -119,13 +119,22 @@ time — not just its final reply — and act on it:
 # type-check + bundle the host build + pack a tgz (DSH_CHECKOUT points at the dsh source checkout)
 bash scripts/build.sh && npm run build:client
 
+# type-check src/ against the dsh that is actually installed (no checkout needed)
+npm run check:compat
+
 # via the injector toolchain
 dev_build_plugin dsh-session-bridge
 ```
 
 `build.sh` type-links against a local DSH checkout and is only for local dev.
+That checkout frequently lags the harness the plugin is loaded into, so a green
+`build.sh` does **not** prove the plugin works on the running DSH — `build.sh`
+warns when the two versions differ. Use `npm run check:compat` for that: it
+type-checks `src/` against the `lib/types/*.d.ts` shipped inside the installed
+DSH package, which is the exact API surface the plugin loads against.
+
 The GitHub Actions CI (`ci.yml`) instead resolves the `@deepseek-ai/dsh-*`
-prereleases from the registry — pinned to the `0.1.2-alpha.2` line, which is
+prereleases from the registry — pinned to the `0.1.6-alpha.1` line, which is
 the DSH API surface this code targets — then runs `pnpm typecheck` and
 `pnpm build:client` (the self-contained `tsdown` bundle). Bump that pin
 together with the code when you migrate to a newer DSH API.
@@ -147,6 +156,14 @@ publishing.
 
 ```bash
 npx -p @deepseek-ai/dsh dsh plugin --profile web add dsh-session-bridge
+```
+
+A prerelease tag (`v0.3.2-alpha.1`) is published to its own dist-tag (`alpha`,
+`beta`, `rc`) instead of `latest`, so it cannot displace the stable release for
+other users. Opt in explicitly:
+
+```bash
+npx -p @deepseek-ai/dsh dsh plugin --profile web add dsh-session-bridge@alpha
 ```
 
 pnpm installs the published tarball and runs its `prepare` script (`tsdown`) to

@@ -14,6 +14,24 @@ if [ -z "$CHECKOUT" ] || [ ! -d "$CHECKOUT/packages" ]; then
   exit 1
 fi
 
+# The type-check below runs against $DSH_CHECKOUT, which commonly lags the dsh
+# that actually loads this plugin — a stale checkout type-checks green while the
+# running harness has already moved on. Warn loudly rather than implying support.
+read_pkg_version() {
+  node -e "try{process.stdout.write(String(require(process.argv[1]).version))}catch(e){process.stdout.write('unknown')}" "$1" 2>/dev/null || echo unknown
+}
+CHECKOUT_VERSION="$(read_pkg_version "$CHECKOUT/package.json")"
+INSTALLED_VERSION="unknown"
+GLOBAL_ROOT="$(npm root -g 2>/dev/null | head -n1 || true)"
+if [ -n "$GLOBAL_ROOT" ] && [ -f "$GLOBAL_ROOT/@deepseek-ai/dsh/package.json" ]; then
+  INSTALLED_VERSION="$(read_pkg_version "$GLOBAL_ROOT/@deepseek-ai/dsh/package.json")"
+fi
+if [ "$INSTALLED_VERSION" != "unknown" ] && [ "$CHECKOUT_VERSION" != "$INSTALLED_VERSION" ]; then
+  echo "build: WARNING — checkout is $CHECKOUT_VERSION but the installed dsh is $INSTALLED_VERSION." >&2
+  echo "build: the type-check below therefore does NOT cover the running harness;" >&2
+  echo "build: run 'npm run check:compat' to type-check against the installed dsh." >&2
+fi
+
 TSC="$CHECKOUT/node_modules/.bin/tsc"
 if [ ! -x "$TSC" ]; then
   echo "build: tsc not found at $TSC" >&2

@@ -33,13 +33,13 @@ jobs:
 
       # The package's @deepseek-ai/dsh-* peer/prerelease ranges (and the local
       # DSH checkout the host build.sh symlinks against) target the DSH
-      # 0.1.5-alpha.2 API surface (snapshotEvents / persistence open-read /
-      # V3 session format), which is carried by the 0.1.5-alpha.2 release on
-      # the registry. CI therefore pins every @deepseek-ai/dsh-* package
-      # (mostly a prerelease that npm/pnpm never matches against a bare
-      # "0.1.5" range) explicitly to that alpha line so the typecheck / bundle
-      # resolve from the registry instead of a local harness checkout. Bump
-      # these together with the code when you migrate.
+      # 0.1.6-alpha.1 API surface (assistant/attempt stream records /
+      # persistence open-read / V3 session format), which is carried by the
+      # 0.1.6-alpha.1 release on the registry. CI therefore pins every
+      # @deepseek-ai/dsh-* package (mostly a prerelease that npm/pnpm never
+      # matches against a bare "0.1.6" range) explicitly to that alpha line so
+      # the typecheck / bundle resolve from the registry instead of a local
+      # harness checkout. Bump these together with the code when you migrate.
       - name: Write registry-resolvable pnpm-workspace overrides
         shell: bash
         run: |
@@ -47,17 +47,17 @@ jobs:
           packages:
             - .
           overrides:
-            '@deepseek-ai/dsh-agent': npm:@deepseek-ai/dsh-agent@0.1.5-alpha.2
-            '@deepseek-ai/dsh-agent-presets': npm:@deepseek-ai/dsh-agent-presets@0.1.5-alpha.2
-            '@deepseek-ai/dsh-home-paths': npm:@deepseek-ai/dsh-home-paths@0.1.5-alpha.2
-            '@deepseek-ai/dsh-llm': npm:@deepseek-ai/dsh-llm@0.1.5-alpha.2
-            '@deepseek-ai/dsh-session': npm:@deepseek-ai/dsh-session@0.1.5-alpha.2
-            '@deepseek-ai/dsh-session-persistence': npm:@deepseek-ai/dsh-session-persistence@0.1.5-alpha.2
-            '@deepseek-ai/dsh-tools': npm:@deepseek-ai/dsh-tools@0.1.5-alpha.2
-            '@deepseek-ai/dsh-workspace': npm:@deepseek-ai/dsh-workspace@0.1.5-alpha.2
-            '@deepseek-ai/dsh-util-values': npm:@deepseek-ai/dsh-util-values@0.1.5-alpha.2
-            '@deepseek-ai/dsh-scope': npm:@deepseek-ai/dsh-scope@0.1.5-alpha.2
-            '@deepseek-ai/dsh-brand': npm:@deepseek-ai/dsh-brand@0.1.5-alpha.2
+            '@deepseek-ai/dsh-agent': npm:@deepseek-ai/dsh-agent@0.1.6-alpha.1
+            '@deepseek-ai/dsh-agent-presets': npm:@deepseek-ai/dsh-agent-presets@0.1.6-alpha.1
+            '@deepseek-ai/dsh-home-paths': npm:@deepseek-ai/dsh-home-paths@0.1.6-alpha.1
+            '@deepseek-ai/dsh-llm': npm:@deepseek-ai/dsh-llm@0.1.6-alpha.1
+            '@deepseek-ai/dsh-session': npm:@deepseek-ai/dsh-session@0.1.6-alpha.1
+            '@deepseek-ai/dsh-session-persistence': npm:@deepseek-ai/dsh-session-persistence@0.1.6-alpha.1
+            '@deepseek-ai/dsh-tools': npm:@deepseek-ai/dsh-tools@0.1.6-alpha.1
+            '@deepseek-ai/dsh-workspace': npm:@deepseek-ai/dsh-workspace@0.1.6-alpha.1
+            '@deepseek-ai/dsh-util-values': npm:@deepseek-ai/dsh-util-values@0.1.6-alpha.1
+            '@deepseek-ai/dsh-scope': npm:@deepseek-ai/dsh-scope@0.1.6-alpha.1
+            '@deepseek-ai/dsh-brand': npm:@deepseek-ai/dsh-brand@0.1.6-alpha.1
             '@deepseek-ai/schemastery': npm:@deepseek-ai/schemastery@3.18.2
             '@deepseek-ai/cordis': npm:@deepseek-ai/cordis@4.0.2
             cordis: npm:@deepseek-ai/cordis@4.0.2

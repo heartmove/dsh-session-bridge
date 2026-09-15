@@ -87,9 +87,18 @@
 # 类型检查 + 打包 host bundle + 生成 tgz（DSH_CHECKOUT 指向 dsh 源码 checkout）
 bash scripts/build.sh && npm run build:client
 
+# 针对"实际安装的 dsh"做类型检查（不需要 checkout）
+npm run check:compat
+
 # 或经注入器工具链
 dev_build_plugin dsh-session-bridge
 ```
+
+`build.sh` 按本地 dsh 源码 checkout 做类型链接，仅用于本地开发。该 checkout 常常
+落后于插件实际加载进的 harness，因此 `build.sh` 通过**并不**代表插件在运行中的
+DSH 上可用——两者版本不一致时 `build.sh` 会给出警告。要验证运行版本请用
+`npm run check:compat`：它按已安装 DSH 包内随附的 `lib/types/*.d.ts`（即插件真正
+加载的 API 面）对 `src/` 做类型检查。
 
 ## 部署
 
@@ -105,6 +114,13 @@ DSH web 从活动 profile 加载外部插件。本包是一个 **bundle**：`pac
 
 ```bash
 npx -p @deepseek-ai/dsh dsh plugin --profile web add dsh-session-bridge
+```
+
+预发布标签（`v0.3.2-alpha.1`）会发布到自己的 dist-tag（`alpha`/`beta`/`rc`），
+而不会占用 `latest`，因此不会顶掉其他用户使用的稳定版。需要显式选用：
+
+```bash
+npx -p @deepseek-ai/dsh dsh plugin --profile web add dsh-session-bridge@alpha
 ```
 
 pnpm 会安装发布的 tarball 并运行其 `prepare` 脚本（`tsdown`）以确保 `lib/` 就绪，
