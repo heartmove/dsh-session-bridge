@@ -194,8 +194,16 @@ function registerCreate(env: BridgeEnv): void {
           ...(model !== '' ? { model } : {}),
           ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
         },
-        setup: (agentCtx: Context) => {
-          if (caller !== undefined) {
+        setup: async (agentCtx: Context) => {
+          const requestedPreset = typeof args.agentPreset === 'string' && args.agentPreset.trim() !== '' ? args.agentPreset.trim() : undefined
+          if (requestedPreset !== undefined) {
+            // An explicit agentPreset composes THAT preset. Falling through to the
+            // caller-join below would silently ignore the request: the id would
+            // still reach the session header, while the agent kept running on the
+            // caller's standing composition and its tools.
+            const presets = env.ctx.agentPresets as unknown as { mount(agentCtx: Context, id: string): Promise<unknown> }
+            await presets.mount(agentCtx, requestedPreset)
+          } else if (caller !== undefined) {
             const presets = env.ctx.agentPresets as unknown as { composeFrom(agentCtx: Context, parentCtx: Context): string | undefined }
             presets.composeFrom(agentCtx, caller.ctx)
           }
