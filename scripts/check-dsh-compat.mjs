@@ -118,6 +118,44 @@ function dshVersionOf(scopeDir) {
   return undefined
 }
 
+/**
+ * Inspect the built tsdown bundle's source map for the DSH version it INLINED.
+ *
+ * `check:compat` type-checks src/ against the installed harness, but src/ is not
+ * what loads: lib/index.js is a self-contained bundle that inlines every
+ * @deepseek-ai/* import. A stale checkout therefore type-checks green while the
+ * artifact ships old DSH code (observed: checkout 0.1.5-alpha.2 / host
+ * 0.1.6-alpha.2). This reads the map's sources — a checkout path names the root
+ * whose package.json carries the version; a .pnpm path encodes it.
+ *
+ * @returns { versions: Set<string>, roots: Set<string> } or undefined when no map exists.
+ */
+function artifactProvenance() {
+  const mapPath = join(ROOT, 'lib', 'index.js.map')
+  if (!existsSync(mapPath)) return undefined
+  let map
+  try { map = JSON.parse(readFileSync(mapPath, 'utf8')) } catch { return undefined }
+  const versions = new Set()
+  const roots = new Set()
+  for (const source of Array.isArray(map.sources) ? map.sources : []) {
+    if (typeof source !== 'string') continue
+    // Source checkout: <root>/packages/... or <root>/vendor/... (relative to the map in lib/).
+    const checkout = source.match(/^(.*?)[/\\](?:packages|vendor)[/\\]/)
+    if (checkout !== null) { roots.add(resolve(ROOT, 'lib', checkout[1])); continue }
+    // Registry install: .../.pnpm/@deepseek-ai+<name>@<version>[_hash]/node_modules/...
+    const registry = source.match(/[\\/]\.pnpm[\\/]@deepseek-ai\+[a-z0-9-]+@([^\\/]+)[\\/]node_modules/)
+    if (registry !== null) {
+      const version = registry[1].replace(/_.*$/, '')
+      if (/^\d/.test(version)) versions.add(version)
+    }
+  }
+  for (const root of roots) {
+    const manifest = readJson(join(root, 'package.json'))
+    if (typeof manifest?.version === 'string') versions.add(manifest.version)
+  }
+  return { versions, roots }
+}
+
 const dshVersion = dshVersionOf(scope) ?? '(unknown)'
 
 // Every DSH package src/ imports, plus the plain `cordis` specifier that
@@ -171,3 +209,17 @@ if (failure !== undefined) {
   fail('src/ does NOT type-check against installed dsh ' + dshVersion + status + ' — this is a real incompatibility with the running harness.')
 }
 console.log('check-dsh-compat: OK — src/ type-checks against installed dsh ' + dshVersion)
+
+const provenance = artifactProvenance()
+if (provenance === undefined) {
+  console.log('check-dsh-compat: no lib/index.js.map — skipping bundle provenance check (run pnpm build:client to enable it)')
+} else if (provenance.versions.size === 0) {
+  console.log('check-dsh-compat: bundle provenance not resolvable from the source map — skipped')
+} else {
+  const inlined = [...provenance.versions].sort().join(', ')
+  console.log('check-dsh-compat: lib/index.js inlined DSH ' + inlined + ' (from ' + provenance.roots.size + ' checkout(s) / registry entries)')
+  if (dshVersion !== '(unknown)' && !(provenance.versions.size === 1 && provenance.versions.has(dshVersion))) {
+    fail('the built lib/index.js inlines DSH ' + inlined + ' but the installed harness is ' + dshVersion
+      + ' — rebuild the bundle against the running harness (a stale checkout type-checks green while shipping old DSH code).')
+  }
+}

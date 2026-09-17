@@ -224,6 +224,17 @@ scripts/
   build.sh    类型检查 + 链接 DSH checkout 类型
 ```
 
+## 生命周期与卸载
+
+DSH ≥ 0.1.6 支持**运行时挂载/卸载**插件（设置 → 插件页开关、注入器热重载）。
+本插件可干净卸载：不注册 loader 级状态，工具随插件 fiber 一并释放，监控定时器
+经 `ctx.effect` 在卸载时清理。
+
+该所有权模型带来一个后果：`session_bridge_create` 创建的会话归插件 fiber 所有
+（agent 在插件上下文下创建），因此**卸载/重载插件会停止这些会话的活动 agent**。
+会话本身已持久化并显示为离线，可用 `session_bridge_resume` 重新上线；守护循环
+同样在卸载时停止。
+
 ## License
 
 MIT

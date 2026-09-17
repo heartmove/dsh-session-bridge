@@ -64,11 +64,19 @@ export interface BridgeFindItem {
 
 /**
  * 兼容读取不同 dsh-session 版本上的会话事件：
- * - 旧版 `Session` 暴露 `get events(): readonly SessionEvent[]`；
- * - 新版（如宿主实际运行的 0.1.2-rc.x）将 `get events` 改为
- *   `snapshotEvents(fromSeq?, toSeqExclusive?)` 方法——`.events` 直接读取会
- *   得到 `undefined`，对 for...of 迭代即抛 `events is not iterable`。
+ * - 旧版 \`Session\` 暴露 \`get events(): readonly SessionEvent[]\`；
+ * - 新版将 \`get events\` 改为 \`snapshotEvents(fromSeq?, toSeqExclusive?)\` 方法——
+ *   \`.events\` 直接读取会得到 \`undefined\`，对 for...of 迭代即抛
+ *   \`events is not iterable\`。
  * 两者都读不到（或 session 不存在）时回退为空数组，绝不抛迭代错误。
+ *
+ * 注意：dsh 0.1.6-alpha.1 起 \`snapshotEvents()\`（连同 \`eventAt()\` /
+ * \`ownEvents()\`）已标记 @deprecated —— 官方策略是"现有逻辑可暂不迁移，但禁止
+ * 新增调用"；其替代不是同步读，而是（a）恢复后读取 Session 投影/派生状态，或
+ * （b）按需异步分页读取历史窗口（见 dsh 决策
+ * 2026-09-09-deprecate-synchronous-session-event-reads）。本函数的调用方
+ * （foldMessages / segmentsSince / wait 基线）仍依赖完整同步快照，故按该决定暂缓
+ * 迁移；将来官方补齐分页读后，只需改造这一个入口。
  */
 export function sessionEvents(session: unknown): readonly SessionEvent[] {
   const s = session as {

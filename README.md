@@ -131,10 +131,13 @@ That checkout frequently lags the harness the plugin is loaded into, so a green
 `build.sh` does **not** prove the plugin works on the running DSH — `build.sh`
 warns when the two versions differ. Use `npm run check:compat` for that: it
 type-checks `src/` against the `lib/types/*.d.ts` shipped inside the installed
-DSH package, which is the exact API surface the plugin loads against.
+DSH package, then reads the built `lib/index.js.map` to verify the
+self-contained bundle actually inlined that same DSH version. (Type-checking
+alone is not enough — a stale checkout type-checks green while the artifact
+ships old DSH code.)
 
 The GitHub Actions CI (`ci.yml`) instead resolves the `@deepseek-ai/dsh-*`
-prereleases from the registry — pinned to the `0.1.6-alpha.1` line, which is
+prereleases from the registry — pinned to the `0.1.6-alpha.2` line, which is
 the DSH API surface this code targets — then runs `pnpm typecheck` and
 `pnpm build:client` (the self-contained `tsdown` bundle). Bump that pin
 together with the code when you migrate to a newer DSH API.
@@ -275,6 +278,19 @@ src/
 scripts/
   build.sh    type-check + link types against the DSH checkout
 ```
+
+## Lifecycle and unloading
+
+DSH ≥ 0.1.6 mounts and **unloads plugins at runtime** (Settings → Plugins, and
+the injector's hot reload). This plugin unloads cleanly: it registers no
+loader-level state, its tools are disposed with the plugin fiber, and the
+monitor's timer is released through `ctx.effect` on unload.
+
+One consequence of that ownership model: sessions created by
+`session_bridge_create` are owned by the plugin fiber (the agent is created
+under the plugin's context), so **unloading or reloading the plugin stops their
+live agents**. The sessions themselves are persisted and show as offline; bring
+one back with `session_bridge_resume`. Monitor watchdogs also stop on unload.
 
 ## License
 
