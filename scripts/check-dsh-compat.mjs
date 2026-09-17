@@ -79,6 +79,13 @@ function resolveScopeDir(argv) {
     }
   } catch { /* dsh not on PATH; the other anchors decide */ }
 
+  // Anchor 3 (last resort): this repository's own install. CI pins the
+  // @deepseek-ai packages through pnpm overrides and installs no DSH app, so
+  // the scope only exists here; probing it keeps check:compat runnable in CI.
+  // A developer machine resolves one of the anchors above first, so the
+  // *running* harness keeps priority there.
+  candidates.push(join(ROOT, 'node_modules', '@deepseek-ai'))
+
   for (const candidate of candidates) if (isScopeDir(candidate)) return candidate
   return undefined
 }
@@ -115,6 +122,13 @@ function dshVersionOf(scopeDir) {
     const manifest = readJson(candidate)
     if (manifest?.name === '@deepseek-ai/dsh' && typeof manifest.version === 'string') return manifest.version
   }
+  // Repo-local install (CI overrides): there is no `dsh` app package, but the
+  // release versions every dsh-* package together, so any of them names the
+  // harness version the types and the bundle were resolved from.
+  for (const pkg of ['dsh-tools', 'dsh-session', 'dsh-agent']) {
+    const manifest = readJson(join(scopeDir, pkg, 'package.json'))
+    if (typeof manifest?.version === 'string') return manifest.version
+  }
   return undefined
 }
 
@@ -142,8 +156,11 @@ function artifactProvenance() {
     // Source checkout: <root>/packages/... or <root>/vendor/... (relative to the map in lib/).
     const checkout = source.match(/^(.*?)[/\\](?:packages|vendor)[/\\]/)
     if (checkout !== null) { roots.add(resolve(ROOT, 'lib', checkout[1])); continue }
-    // Registry install: .../.pnpm/@deepseek-ai+<name>@<version>[_hash]/node_modules/...
-    const registry = source.match(/[\\/]\.pnpm[\\/]@deepseek-ai\+[a-z0-9-]+@([^\\/]+)[\\/]node_modules/)
+    // Registry install: .../.pnpm/@deepseek-ai+dsh-<name>@<version>[_hash]/node_modules/...
+    // Only dsh-* packages name the harness release; sibling @deepseek-ai
+    // packages (cordis, schemastery) are versioned independently, so counting
+    // them would make every CI build look like a provenance mismatch.
+    const registry = source.match(/[\\/]\.pnpm[\\/]@deepseek-ai\+dsh-[a-z0-9-]+@([^\\/]+)[\\/]node_modules/)
     if (registry !== null) {
       const version = registry[1].replace(/_.*$/, '')
       if (/^\d/.test(version)) versions.add(version)

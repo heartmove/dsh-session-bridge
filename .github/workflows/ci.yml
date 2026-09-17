@@ -76,13 +76,12 @@ jobs:
       - name: Build
         run: pnpm build:client
 
-      # The typecheck above only proves src/ matches the installed DSH types; it
-      # cannot see whether the artifact inlined that same DSH. This reads
-      # lib/index.js.map and fails when the bundle's DSH provenance differs from
-      # the installed harness (skips gracefully when unresolvable).
-      - name: Check DSH compatibility
-        run: pnpm check:compat
-
+      # NOTE: `pnpm check:compat` is intentionally NOT run here. It type-checks
+      # and provenance-checks against the *installed harness* (a global DSH with
+      # @deepseek-ai/* siblings, including the bare `cordis` alias target).
+      # A repo-local pnpm install has no such scope, so run it on a machine with
+      # DSH installed (`npm run check:compat`), not in CI. CI still type-checks
+      # src/ against the pinned @deepseek-ai/* packages via `pnpm typecheck`.
       - name: Pack
         run: pnpm pack --pack-destination .
 
