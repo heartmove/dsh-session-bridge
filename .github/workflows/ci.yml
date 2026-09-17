@@ -76,6 +76,13 @@ jobs:
       - name: Build
         run: pnpm build:client
 
+      # The typecheck above only proves src/ matches the installed DSH types; it
+      # cannot see whether the artifact inlined that same DSH. This reads
+      # lib/index.js.map and fails when the bundle's DSH provenance differs from
+      # the installed harness (skips gracefully when unresolvable).
+      - name: Check DSH compatibility
+        run: pnpm check:compat
+
       - name: Pack
         run: pnpm pack --pack-destination .
 
