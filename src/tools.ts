@@ -20,6 +20,7 @@ import {
   attachSessionToWorkspace,
   foldMessages,
   inspectPersistedSession,
+  isStalled,
   maxSeq,
   resolveTargetCwd,
   segmentsSince,
@@ -76,6 +77,15 @@ function liveAgents(env: BridgeEnv): LiveAgentLike[] {
   return agents.list()
 }
 
+/** 等待结果里的状态附注行（wait / send / create 三处渲染共用）。 */
+function waitNotes(reply: Record<string, unknown>): string[] {
+  const notes: string[] = []
+  if (reply.timedOut === true) notes.push('[wait timed out]')
+  if (reply.stale === true) notes.push('[stale] pre-existing reply — nothing new arrived during the wait')
+  if (reply.aborted === true) notes.push('[wait aborted]')
+  return notes
+}
+
 /** 渲染等待结果为 JSON 友好值。 */
 function renderWait(wait: BridgeWaitResult): Record<string, unknown> {
   const row = wait.message
@@ -91,6 +101,7 @@ function renderWait(wait: BridgeWaitResult): Record<string, unknown> {
     seq: wait.seq,
     turnEnded: wait.turnEnded,
     timedOut: wait.timedOut,
+    ...(wait.stale === true ? { stale: true } : {}),
     aborted: wait.aborted,
     waitedMs: wait.waitedMs,
   }
@@ -154,9 +165,10 @@ function registerCreate(env: BridgeEnv): void {
         if (typeof v.cwd === 'string') lines.push(`cwd: ${v.cwd}`)
         if (typeof v.title === 'string') lines.push(`title: ${v.title}`)
         const reply = v.reply as Record<string, unknown> | undefined
+        if (typeof v.sinceSeq === 'number') lines.push(`sinceSeq: ${String(v.sinceSeq)} (pass to session_bridge_wait)`)
         if (reply !== undefined) {
           lines.push(`reply: ${String((reply.message as Record<string, unknown> | null)?.text ?? '(no text)')}`)
-          if (reply.timedOut === true) lines.push('[wait timed out]')
+          lines.push(...waitNotes(reply))
         }
         return [{ type: 'text' as const, text: lines.join('\n') }]
       },
@@ -245,8 +257,12 @@ function registerCreate(env: BridgeEnv): void {
       })
 
       let reply: ReturnType<typeof renderWait> | undefined
+      // 发送 prompt 之前的日志锚点：异步创建时交还调用方，供之后精确 wait 取回首条回复。
+      // 新建会话的 maxSeq 为 -1（尚无事件），所以"未发送"用 undefined 哨兵而不是数值比较。
+      let createBaseline: number | undefined
       if (typeof args.prompt === 'string' && args.prompt.trim() !== '') {
         const baseline = maxSeq(sessionEvents(agent.session))
+        createBaseline = baseline
         agent.followup(userMessage(args.prompt.trim()))
         env.registry.touch(sessionId)
         if (args.waitForReply === true) {
@@ -259,6 +275,7 @@ function registerCreate(env: BridgeEnv): void {
         cwd: targetCwd,
         ...(workspaceId === undefined ? {} : { workspaceId }),
         ...(typeof args.title === 'string' && args.title.trim() !== '' ? { title: args.title.trim() } : {}),
+        ...(reply === undefined && createBaseline !== undefined ? { sinceSeq: createBaseline } : {}),
         ...(reply === undefined ? {} : { reply }),
       })
     },
@@ -290,9 +307,10 @@ function registerSend(env: BridgeEnv): void {
         const v = value as Record<string, unknown>
         const reply = v.reply as Record<string, unknown> | null | undefined
         const lines = ['sent to ' + String(v.sessionId)]
+        if (typeof v.sinceSeq === 'number') lines.push('sinceSeq: ' + String(v.sinceSeq) + ' (pass to session_bridge_wait)')
         if (reply !== null && reply !== undefined) {
           lines.push('reply: ' + String((reply.message as Record<string, unknown> | null)?.text ?? '(no text)'))
-          if ((reply as Record<string, unknown>).timedOut === true) lines.push('[wait timed out]')
+          lines.push(...waitNotes(reply))
         }
         return [{ type: 'text' as const, text: lines.join('\n') }]
       },
@@ -316,7 +334,9 @@ function registerSend(env: BridgeEnv): void {
         ...(sendWorkspaceId === undefined ? {} : { workspaceId: sendWorkspaceId }),
       })
       const reply = await maybeWait(env, agent.session, baseline, args, exec.signal)
-      return asJson({ accepted: true, sessionId: args.sessionId, ...(reply === undefined ? {} : { reply }) })
+      // 未同步等待时把发送前的锚点交还给调用方：之后无论隔多久，用该 sinceSeq 调
+      // session_bridge_wait 都能稳定取回"本次发送之后的回复"（不受调用方延迟影响）。
+      return asJson({ accepted: true, sessionId: args.sessionId, ...(reply === undefined ? { sinceSeq: baseline } : { reply }) })
     },
   }))
 }
@@ -413,10 +433,10 @@ interface WaitArgsTool {
 function registerWait(env: BridgeEnv): void {
   env.ctx.tools.register(defineTool({
     name: 'session_bridge_wait',
-    description: 'Wait for a session next assistant output: blocks (polling the session log) until a NEW assistant output appears after sinceSeq (default: the latest seq at call time). waitFor=reply returns as soon as a new assistant TEXT reply is readable; waitFor=segment returns as soon as any new COMPLETED output segment appears (an assistant/message step — text, reasoning, or tool-call turn), i.e. it does NOT wait for the whole turn, so you can observe the chain-of-thought/output paragraph by paragraph as it is produced. Returns the output summary, or timedOut/aborted when the deadline or caller cancellation ends the wait. Use it to consume output produced asynchronously by another session (e.g. a session you sent a message to, or one working on its own).',
+    description: 'Wait for a session next assistant output: blocks (polling the session log) until a NEW assistant output appears after sinceSeq (default: the latest seq at call time). waitFor=reply returns as soon as a new assistant TEXT reply is readable; waitFor=segment returns as soon as any new COMPLETED output segment appears (an assistant/message step — text, reasoning, or tool-call turn), i.e. it does NOT wait for the whole turn, so you can observe the chain-of-thought/output paragraph by paragraph as it is produced. If no new output arrives within the budget, the latest PRE-EXISTING reply/segment is returned with stale=true (so an already-landed reply is never lost as "(no text)"). Returns the output summary, or timedOut/aborted when the deadline or caller cancellation ends the wait. Use it to consume output produced asynchronously by another session (e.g. a session you sent a message to, or one working on its own); to read a reply that may already exist, pass the sinceSeq anchor returned by send/create.',
     parameters: {
       sessionId: { type: 'string', required: true, description: 'Session id to wait on.' },
-      sinceSeq: { type: 'number', description: 'Only replies after this event seq count (default: latest seq at call time).' },
+      sinceSeq: { type: 'number', description: 'Only replies after this event seq count (default: latest seq at call time; -1 = count every event, the anchor returned by create for a brand-new session).' },
       timeoutMs: { type: 'number', description: 'Wait budget in milliseconds (default 180000, max 3600000); timed out waits return the partial result instead of failing.' },
       requireTurnEnd: { type: 'boolean', description: 'When true, wait for the reply turn/end to settle before returning (default false; false returns as soon as the reply text is readable).' },
       waitFor: { type: 'string', enum: ['reply', 'segment'], description: 'reply (default) waits for a new assistant TEXT reply; segment waits for any new completed output segment (an assistant/message step, incl. reasoning/tool turns) and returns it immediately, without waiting for the whole turn.' },
@@ -428,10 +448,11 @@ function registerWait(env: BridgeEnv): void {
         const reply = v.reply as Record<string, unknown> | null | undefined
         if (reply === null || reply === undefined) return [{ type: 'text' as const, text: 'no reply observed' }]
         const message = (reply.message as Record<string, unknown> | null)
-        const lines = ['reply seq ' + String(reply.seq) + ': ' + String(message === null ? '(no text)' : message.text ?? '(no text)')]
+        const lines = [message === null
+          ? 'no new reply within ' + String(reply.waitedMs ?? '?') + 'ms (no assistant text in this session)'
+          : 'reply seq ' + String(reply.seq) + ': ' + String(message.text ?? '(no text)')]
         if (typeof reply.turnEnded === 'boolean') lines.push('turnEnded: ' + String(reply.turnEnded))
-        if (reply.timedOut === true) lines.push('[wait timed out]')
-        if (reply.aborted === true) lines.push('[wait aborted]')
+        lines.push(...waitNotes(reply))
         return [{ type: 'text' as const, text: lines.join('\n') }]
       },
     },
@@ -441,34 +462,25 @@ function registerWait(env: BridgeEnv): void {
       if (agent === undefined) {
         throw new Error('session ' + JSON.stringify(args.sessionId) + ' is not live — call session_bridge_resume first (waiting requires a live session)')
       }
-      // 默认 baseline = 当前最后一条（带文本的）assistant 行的 seq：让 wait 只等待
-      // 之后新出现的输出，避免把"已存在的输出"当成待等内容，同时不被文本后追加的
-      // 无文本中间块（推理尾块/工具结果）干扰。segment 模式下以最后一个已完成段落为界。
-      const waitSegment = args.waitFor === 'segment'
-      let baseline: number
-      if (typeof args.sinceSeq === 'number' && Number.isInteger(args.sinceSeq) && args.sinceSeq >= 0) {
-        baseline = args.sinceSeq
-      } else if (waitSegment) {
-        const segs = segmentsSince(sessionEvents(agent.session))
-        baseline = segs.length === 0 ? -1 : (segs[segs.length - 1]?.seq ?? -1)
-      } else {
-        let lastText = -1
-        for (const row of foldMessages(sessionEvents(agent.session))) {
-          if (row.text !== undefined) lastText = row.seq
-        }
-        baseline = lastText
-      }
+      // 默认 baseline = 调用时刻的日志最大 seq（即工具描述承诺的 "latest seq at call
+      // time"，两种 waitFor 模式统一）：只等待之后新出现的输出。既有回复不会被误当成
+      // 新输出，但也绝不会被吞掉 —— waitForReply 在零新输出时会回落它并置 stale:true。
+      // 调用方若要在"回复早已落地"之后再精确取回它，应传 send/create 返回的 sinceSeq 锚点。
+      const baseline = typeof args.sinceSeq === 'number' && Number.isInteger(args.sinceSeq) && args.sinceSeq >= -1
+        ? args.sinceSeq
+        : maxSeq(sessionEvents(agent.session))
       const result = await waitForReply({
         session: agent.session,
         baselineSeq: baseline,
         timeoutMs: clampTimeout(args.timeoutMs),
         signal: exec.signal,
         requireTurnEnd: args.requireTurnEnd === true,
-        ...(waitSegment ? { waitForSegment: true } : {}),
+        ...(args.waitFor === 'segment' ? { waitForSegment: true } : {}),
       })
       env.registry.touch(args.sessionId)
       return asJson({
         sessionId: args.sessionId,
+        sinceSeq: baseline,
         reply: renderWait(result),
         running: agent.status === 'running',
       })
@@ -961,7 +973,11 @@ function pruneReasoning(snapshot: BridgeStatusSnapshot, mode: StatusReasoning): 
   return rest
 }
 
-/** 渲染监控快照为一行摘要：运行态 + openTurn + 卡住/待处理 + 最新回复(+ 思维链预览)。 */
+/**
+ * 渲染监控快照为一行摘要：运行态 + openTurn + 卡住/待处理 + 最新回复(+ 思维链预览)。
+ * 卡住判定走 core.isStalled（唯一真源）：只有 running 会话才可能被标 [STALLED] ——
+ * 空闲/已收尾的会话"很久没事件"是正常状态，不是卡住（与监控 watchdog 一致）。
+ */
 function renderStatus(snapshot: BridgeStatusSnapshot, stalledMsThreshold: number): string[] {
   const lines: string[] = []
   const runLabel = snapshot.running === 'running' ? 'running' : 'idle'
@@ -969,7 +985,7 @@ function renderStatus(snapshot: BridgeStatusSnapshot, stalledMsThreshold: number
   if (snapshot.openTurn) lines.push(`openTurn: yes (turn #${snapshot.lastTurn})`)
   else lines.push(`openTurn: no (last turn #${snapshot.lastTurn})`)
   if (snapshot.stalledMs !== null) {
-    const stalled = snapshot.stalledMs >= stalledMsThreshold
+    const stalled = isStalled(snapshot.running, snapshot.stalledMs, stalledMsThreshold)
     lines.push(`lastActivity: now-${snapshot.stalledMs}ms${stalled ? ' [STALLED]' : ''}`)
   }
   if (snapshot.pendingWork) lines.push(`pendingWork: ${snapshot.nextTurnCount} turn + ${snapshot.nextStepCount} step`)
@@ -984,10 +1000,10 @@ function renderStatus(snapshot: BridgeStatusSnapshot, stalledMsThreshold: number
 function registerStatus(env: BridgeEnv): void {
   env.ctx.tools.register(defineTool({
     name: 'session_bridge_status',
-    description: 'Inspect a session\'s live progress for monitoring/scheduling. Returns running/idle, whether a turn is open, last turn number, time since the last event (for stall detection), pending queued work, and the latest text reply. It also surfaces the session\'s chain-of-thought: lastReasoning is the most recent finalized reasoning block, liveReasoning is the in-flight reasoning streamed for the current handled turn (reasoning-delta), and reasoningTail is a compact merged preview. reasoning=none drops all three to keep tokens small. When stalledMsThreshold is given, marks the session as stalled when the time since the last event exceeds it. Pass sessionId of a live session (use session_bridge_find to locate; session_bridge_resume to bring an offline one online). Use this as the "observe" step of a monitor→decide→steer/cancel loop.',
+    description: 'Inspect a session\'s live progress for monitoring/scheduling. Returns running/idle, whether a turn is open, last turn number, time since the last event (for stall detection), pending queued work, and the latest text reply. It also surfaces the session\'s chain-of-thought: lastReasoning is the most recent finalized reasoning block, liveReasoning is the in-flight reasoning streamed for the current handled turn (reasoning-delta), and reasoningTail is a compact merged preview. reasoning=none drops all three to keep tokens small. When stalledMsThreshold is given, marks a RUNNING session as stalled once the time since the last event exceeds it (idle sessions are never flagged — a quiet finished session is not stuck). Pass sessionId of a live session (use session_bridge_find to locate; session_bridge_resume to bring an offline one online). Use this as the "observe" step of a monitor→decide→steer/cancel loop.',
     parameters: {
       sessionId: { type: 'string', required: true, description: 'Session id to inspect (must be live).' },
-      stalledMsThreshold: { type: 'number', description: 'Mark the session STALLED when time since the last event exceeds this many ms (default 60000).' },
+      stalledMsThreshold: { type: 'number', description: 'Mark a RUNNING session STALLED when time since the last event exceeds this many ms (default 60000); idle sessions are never marked.' },
       recent: { type: 'number', description: 'Number of recent messages to include in the snapshot (default 8, max 20).' },
       reasoning: { type: 'string', enum: ['none', 'last', 'live', 'tail'], description: 'Which chain-of-thought fields to include: tail (default) returns lastReasoning/liveReasoning/reasoningTail; last only the finalized reasoning; live only the in-flight reasoning; none drops all reasoning fields.' },
     },

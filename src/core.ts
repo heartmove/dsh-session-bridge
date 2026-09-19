@@ -44,6 +44,12 @@ export interface BridgeWaitResult {
   seq: number
   turnEnded: boolean
   timedOut: boolean
+  /**
+   * true = 返回的是等待开始前就已经存在的输出（整个等待窗口内没有出现新的文本
+   * 回复 / 新段落）。此时 message 仍带正文，调用方据此区分"等到了新回复"与
+   * "拿到的是既有回复"。不变式：stale === (message !== null && message.seq <= baselineSeq)。
+   */
+  stale: boolean
   aborted: boolean
   waitedMs: number
 }
@@ -429,8 +435,11 @@ export interface WaitForReplyOptions {
  * 因此默认不再用 turn/end 作门控；需要完整收尾语义时用 requireTurnEnd:true 显式开启，
  * 此时才会等到其后出现 turn/end。
  *
- * 返回时 message 为"最新的带文本 assistant 行"，否则为最新 assistant 行（可能无文本，
- * 如纯工具调用中间态）；超时/中止返回已收集内容。
+ * 返回的 message：默认是 baseline 之后最新的一条**带文本** assistant 行；整个等待
+ * 窗口内没有等到新文本回复时，回落为 baseline 及之前最新的一条带文本回复并置
+ * stale:true（绝不把更晚的无文本中间行当回复返回 —— 那正是渲染层打印 "(no text)"
+ * 的来源）。segment 模式同理：新段落优先，否则回落既有段落。
+ * 超时/中止返回已收集内容；timedOut 表示"本次等待要求的输出未在预算内出现"。
  */
 export async function waitForReply(opts: WaitForReplyOptions): Promise<BridgeWaitResult> {
   const started = Date.now()
@@ -466,21 +475,58 @@ export async function waitForReply(opts: WaitForReplyOptions): Promise<BridgeWai
     if (Date.now() >= deadline) break
     await sleep(100)
   }
+  // 等待窗口内是否观察到新输出（即 done 条件是否达成）：用于 timedOut / stale 判定。
+  const observedNew = waitForSegment ? segment !== null : textReply !== null
+  const sawNewRow = latest !== null
+  // 零新输出时回落既有内容；回落扫描限定 seq <= baselineSeq，保证 stale 不变式成立，
+  // 也不会把"其实算新"的内容标成 stale。
+  let stale = false
+  if (waitForSegment) {
+    if (segment === null) {
+      const prev = lastSegmentUpTo(sessionEvents(opts.session), opts.baselineSeq)
+      if (prev !== null) { segment = prev; stale = true }
+    }
+  } else if (textReply === null) {
+    const prev = lastTextRowUpTo(foldMessages(sessionEvents(opts.session)), opts.baselineSeq)
+    if (prev !== null) { textReply = prev; stale = true }
+  }
   // 段落模式返回该段（把 reasoning 并进返回行，便于“按段落读思维链”）；否则返回最新文本行。
-  let message: BridgeMessageRow | null = waitForSegment && segment !== null ? {
+  const message: BridgeMessageRow | null = waitForSegment && segment !== null ? {
     seq: segment.seq, time: segment.time, role: 'assistant', images: 0,
     ...(segment.text !== undefined ? { text: segment.text } : {}),
     ...(segment.reasoning !== undefined ? { reasoning: segment.reasoning } : {}),
     ...(segment.toolCalls.length > 0 ? { toolCalls: segment.toolCalls } : {}),
-  } : (textReply ?? latest)
+  } : textReply
   return {
     message,
     seq: message === null ? opts.baselineSeq : message.seq,
     turnEnded,
-    timedOut: requireTurnEnd ? (latest !== null && !turnEnded) : waitForSegment ? segment === null : textReply === null,
+    // done 条件未达成即超时。requireTurnEnd 下"连新行都没出现"同样算超时
+    // （旧写法 latest !== null && !turnEnded 会把这种情况误报为未超时）。
+    timedOut: requireTurnEnd ? !(sawNewRow && turnEnded) : !observedNew,
+    stale,
     aborted: opts.signal !== undefined && opts.signal.aborted,
     waitedMs: Date.now() - started,
   }
+}
+
+/** seq 及之前最新一个已完成输出段落（wait 零新输出时回落既有段落）。 */
+function lastSegmentUpTo(events: readonly SessionEvent[], seq: number): BridgeSegment | null {
+  const segs = segmentsSince(events)
+  for (let i = segs.length - 1; i >= 0; i -= 1) {
+    const seg = segs[i]
+    if (seg !== undefined && seg.seq <= seq) return seg
+  }
+  return null
+}
+
+/** seq 及之前最新一条带文本的 assistant 行（wait 零新文本回复时回落既有回复）。 */
+function lastTextRowUpTo(rows: readonly BridgeMessageRow[], seq: number): BridgeMessageRow | null {
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const row = rows[i]
+    if (row !== undefined && row.role === 'assistant' && row.text !== undefined && row.seq <= seq) return row
+  }
+  return null
 }
 
 export interface TargetCwdArgs {
@@ -548,6 +594,15 @@ export async function attachSessionToWorkspace(ctx: Context, sessionId: SessionI
     return undefined
   }
   return workspace.id
+}
+
+/**
+ * 卡住判定（唯一真源，status 渲染与监控 watchdog 共用）：只有 **running** 会话才可能
+ * "卡住" —— 空闲/已收尾的会话没有进展是正常状态，不能报 stall。阈值语义为"超过"
+ * （严格大于），与工具描述/README 的 "more than stalledMs" 一致。
+ */
+export function isStalled(running: 'running' | 'idle', stalledMs: number | null, thresholdMs: number): boolean {
+  return running === 'running' && stalledMs !== null && stalledMs > thresholdMs
 }
 
 /** 一次会话监控快照：供"监控线程"判断主任务是否在跑、有无进展、是否卡住。 */

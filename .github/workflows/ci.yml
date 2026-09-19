@@ -73,6 +73,11 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      # Regression tests for the wait/stall core logic (issue #1). They import
+      # src/core.ts directly via Node type stripping — no build step required.
+      - name: Test
+        run: pnpm test
+
       - name: Build
         run: pnpm build:client
 

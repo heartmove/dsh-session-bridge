@@ -11,14 +11,19 @@
 
 - **创建真实 DSH 会话。** `session_bridge_create` 在当前工作区创建新的主会话（顶层 UI 会话），
   传 `workspaceId` / `cwd` 则跨工作区；可选发送首条 prompt 并阻塞等待首条回复。provider / model /
-  reasoning effort 默认继承调用会话。
+  reasoning effort 默认继承调用会话。异步创建（不带 `waitForReply`）会返回 `sinceSeq` 锚点，
+  之后可用它精确地 `session_bridge_wait` 取回首条回复。
 - **向任意会话发消息。** `session_bridge_send` 追加一轮（`mode=queue`）或向运行中的步骤注入
-  steering（`mode=steer`），可选等待下一条回复。
-- **等待回复或段落。** `session_bridge_wait` 阻塞直至 `sinceSeq` 之后出现新的 assistant 输出：
-  `waitFor=reply`（默认）在有新的**文本**回复可读时立即返回；`waitFor=segment` 在任意新**已完成
-  输出步骤**出现时立即返回（一个 `assistant/message`——文本、推理或工具调用段），*无需*等整个
-  turn 结束，从而可以按段落逐段观察输出。开 `requireTurnEnd` 则同时等待回合收尾。
-  超时 / 中止返回部分结果，而非抛错。
+  steering（`mode=steer`），可选等待下一条回复；异步发送同样返回 `sinceSeq` 锚点。
+- **等待回复或段落。** `session_bridge_wait` 阻塞直至 `sinceSeq` 之后出现新的 assistant 输出
+  （默认 `sinceSeq` = 调用时刻的最新事件 seq）：`waitFor=reply`（默认）在有新的**文本**回复可读时
+  立即返回；`waitFor=segment` 在任意新**已完成输出步骤**出现时立即返回（一个 `assistant/message`
+  ——文本、推理或工具调用段），*无需*等整个 turn 结束，从而可以按段落逐段观察输出。开
+  `requireTurnEnd` 则同时等待回合收尾。超时 / 中止返回部分结果，而非抛错。
+  **回复早已落地也不会丢**：预算内没等到新输出时，会返回预算前就存在的最新回复/段落并置
+  `stale: true`（不会再出现 `(no text)`）。要精确取回"某次发送之后的回复"，把 `session_bridge_send` /
+  `session_bridge_create` 异步返回的 `sinceSeq` 作为锚点传进来即可（与调用方延迟无关）；
+  `sinceSeq: -1` 表示"连既有事件也算"，即新建会话的锚点。
 - **读取任意会话。** `session_bridge_read` 把会话事件日志折叠为可读行——live 或离线（持久化）均可；
   支持 `sinceSeq` 分页、role 过滤、`limit`（默认 20，最大 100）。
 - **按段落读取输出。** `session_bridge_segments` 返回会话的**已完成输出段落**——每个已完成的
@@ -29,7 +34,8 @@
 - **查找会话。** `session_bridge_find` 跨全部工作区按 标题 / id / workspace / 目录 匹配，返回
   live/running 状态、标题、工作目录；bridge 登记的标题作为别名参与匹配。
 - **监控并调度主任务。** `session_bridge_status` 读取会话实时进度（running/idle、是否 `openTurn`、
-  距最近事件毫秒数做卡住检测、待处理消息、最新回复）；`session_bridge_cancel` 停止一个运行中的会话；
+  距最近事件毫秒数做卡住检测、待处理消息、最新回复）；只有 **running** 会话才会被标 `[STALLED]`
+  （空闲会话没有进展是正常状态，与守护循环判定一致）。`session_bridge_cancel` 停止一个运行中的会话；
   `session_bridge_monitor_start` 运行一个**后台守护循环**，轮询任务、卡住时催办、偏离时纠偏、
   持续卡住则终止、完成即收尾。
 - **归档会话。** `session_bridge_archive` 把会话加入 DSH workspace 归档集合（从所有分组视图隐藏，
@@ -48,7 +54,8 @@
 | 连续卡住 ≥ `maxStuckCycles` | `cancel` 终止 |
 | 正常推进 | 重置卡住计数（steady） |
 
-守护只对 **running** 会话判定"卡住"，因此已完成/空闲的任务会被收尾而非无限催办。日志写入
+守护只对 **running** 会话判定"卡住"，因此已完成/空闲的任务会被收尾而非无限催办
+（`session_bridge_status` 的 `[STALLED]` 标注同理，只对 running 会话显示）。日志写入
 `~/.dsh/super-injector/dsh-session-bridge-monitor.log`（可用 `logFile` 覆盖）。
 
 用 `session_bridge_monitor_start` / `_stop` / `_list` 控制。
@@ -89,6 +96,9 @@ bash scripts/build.sh && npm run build:client
 
 # 针对"实际安装的 dsh"做类型检查（不需要 checkout）
 npm run check:compat
+
+# 核心 wait/卡住判定的回归测试（Node 类型擦除直跑 src/core.ts，零依赖）
+npm test
 
 # 或经注入器工具链
 dev_build_plugin dsh-session-bridge
@@ -194,14 +204,14 @@ dev_inject_plugin D:\code\dsh-session-bridge
 
 | 工具 | 作用 |
 |---|---|
-| `session_bridge_create` | 创建主会话（当前或其它工作区，经 `workspaceId` / `cwd`）；可选首条 prompt + `waitForReply`。 |
-| `session_bridge_send` | 发消息（`mode=queue`/`steer`）；可选等待回复。 |
-| `session_bridge_wait` | 等待 `sinceSeq` 之后新输出：`waitFor=reply`（文本）或 `waitFor=segment`（任一已完成步骤即返回，无需等整个 turn）；可选 `requireTurnEnd`。 |
+| `session_bridge_create` | 创建主会话（当前或其它工作区，经 `workspaceId` / `cwd`）；可选首条 prompt + `waitForReply`；异步时返回 `sinceSeq` 锚点。 |
+| `session_bridge_send` | 发消息（`mode=queue`/`steer`）；可选等待回复；异步时返回 `sinceSeq` 锚点。 |
+| `session_bridge_wait` | 等待 `sinceSeq` 之后新输出（默认 = 调用时刻最新 seq，`-1` = 从头发算）：`waitFor=reply`（文本）或 `waitFor=segment`（任一已完成步骤即返回，无需等整个 turn）；可选 `requireTurnEnd`；零新输出时回落既有回复并置 `stale`。 |
 | `session_bridge_read` | 读取消息 —— live 或离线；`sinceSeq` 分页、`role` 过滤、`limit`。 |
 | `session_bridge_segments` | 增量读取已完成输出段落（每个已完成的 assistant 步骤）—— live 或离线。 |
 | `session_bridge_resume` | 让持久化会话重新上线（幂等）。 |
 | `session_bridge_find` | 跨工作区按 标题 / id / workspace / 目录 查找会话。 |
-| `session_bridge_status` | 读取会话实时进度（running、openTurn、卡住检测、待处理、最新回复）及实时/已定型思维链（`reasoning` 参数）。 |
+| `session_bridge_status` | 读取会话实时进度（running、openTurn、卡住检测、待处理、最新回复）及实时/已定型思维链（`reasoning` 参数）；`[STALLED]` 仅对 running 会话显示。 |
 | `session_bridge_cancel` | 停止运行中的会话（中止活动 turn；`keepInbox` 保留排队/steering 输入）。 |
 | `session_bridge_monitor_start` | 对一个主会话启动后台守护（轮询、催办、纠偏、终止、收尾）；支持思维链 `coRules`（如 reasoning not-contains "I'm" → cancel）。 |
 | `session_bridge_monitor_stop` | 停止守护（会话本身不终止）。 |
@@ -209,7 +219,7 @@ dev_inject_plugin D:\code\dsh-session-bridge
 | `session_bridge_archive` | 归档会话（从分组隐藏；历史与位置保留）。 |
 | `session_bridge_archived` | 列出归档集合，可选解析标题。 |
 
-所有工具输出 lossless JSON；等待类工具超时不抛错，返回 `timedOut` / `aborted` 标记。
+所有工具输出 lossless JSON；等待类工具超时不抛错，返回 `timedOut` / `aborted` / `stale` 标记。
 
 ## 项目结构
 
@@ -222,6 +232,7 @@ src/
   registry.ts 桥侧标题/workspace 登记表（~/.dsh/session-bridge-registry.json）
 scripts/
   build.sh    类型检查 + 链接 DSH checkout 类型
+  test-bridge-core.mjs  wait/卡住判定回归测试（npm test）
 ```
 
 ## 生命周期与卸载

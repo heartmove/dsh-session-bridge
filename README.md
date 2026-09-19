@@ -16,18 +16,26 @@ action does.
   session (top-level UI session) in the current workspace, or in another
   workspace when you pass `workspaceId` / `cwd`. It can send one first prompt
   and optionally block until the first reply. Provider / model / reasoning
-  effort are inherited from the calling session by default.
+  effort are inherited from the calling session by default. An async create
+  (no `waitForReply`) returns a `sinceSeq` anchor for a later precise `wait`.
 - **Send messages to any session.** `session_bridge_send` appends a turn
   (`mode=queue`) or injects steering into the running step (`mode=steer`), and
-  can optionally wait for the next reply.
+  can optionally wait for the next reply. An async send also returns a
+  `sinceSeq` anchor.
 - **Wait for a reply or a segment.** `session_bridge_wait` blocks until new
-  assistant output appears after a given seq: `waitFor=reply` (default) returns
-  as soon as a new **text** reply is readable; `waitFor=segment` returns as
-  soon as any new **completed output step** appears (an `assistant/message` —
-  text, reasoning, or tool-call turn), *without* waiting for the whole turn, so
-  you can observe output paragraph by paragraph as it is produced. With
-  `requireTurnEnd` it additionally waits for the turn to settle.
-  Timeout / abort return the partial result rather than throwing.
+  assistant output appears after `sinceSeq` (default: the latest event seq at
+  call time): `waitFor=reply` (default) returns as soon as a new **text** reply
+  is readable; `waitFor=segment` returns as soon as any new **completed output
+  step** appears (an `assistant/message` — text, reasoning, or tool-call turn),
+  *without* waiting for the whole turn, so you can observe output paragraph by
+  paragraph as it is produced. With `requireTurnEnd` it additionally waits for
+  the turn to settle. Timeout / abort return the partial result rather than
+  throwing. **An already-landed reply is never lost**: when no new output
+  arrives within the budget, the latest PRE-EXISTING reply/segment is returned
+  with `stale: true` (no more `(no text)`). To retrieve exactly "the reply to
+  what I sent", pass the `sinceSeq` returned by `session_bridge_send` /
+  `session_bridge_create` (works regardless of caller latency); `sinceSeq: -1`
+  counts existing events too, i.e. the anchor for a brand-new session.
 - **Read any session.** `session_bridge_read` folds a session's event log into
   readable rows — live or offline (from persistence) — with `sinceSeq` paging,
   role filtering, and a `limit` (default 20, max 100).
@@ -44,7 +52,9 @@ action does.
   working directory. Bridge-registered titles act as aliases.
 - **Monitor and schedule a main task.** `session_bridge_status` reads a
   session's real-time progress (running/idle, open turn, time since the last
-  event for stall detection, pending work, latest reply). `session_bridge_cancel`
+  event for stall detection, pending work, latest reply); only a **running**
+  session is flagged `[STALLED]` (a quiet idle session is not stuck — same rule
+  as the watchdog). `session_bridge_cancel`
   stops a running session. `session_bridge_monitor_start` runs a **background
   watchdog loop** that polls the task, nudges it when it stalls, corrects it
   when it drifts, terminates it after it stays stuck, and wraps up when it
@@ -68,7 +78,9 @@ action does.
 | Making progress | Reset the stall counter (steady) |
 
 The watchdog only treats **running** sessions as stalled, so a finished or idle
-task is wrapped up rather than nudged forever. Logs go to
+task is wrapped up rather than nudged forever (the `[STALLED]` marker in
+`session_bridge_status` follows the same rule and is shown for running sessions
+only). Logs go to
 `~/.dsh/super-injector/dsh-session-bridge-monitor.log` (overridable).
 
 Control it with `session_bridge_monitor_start` / `_stop` / `_list`.
@@ -121,6 +133,9 @@ bash scripts/build.sh && npm run build:client
 
 # type-check src/ against the dsh that is actually installed (no checkout needed)
 npm run check:compat
+
+# regression tests for the wait/stall core logic (Node type stripping, no deps)
+npm test
 
 # via the injector toolchain
 dev_build_plugin dsh-session-bridge
@@ -248,14 +263,14 @@ registration and junction; not re-assembled on restart).
 
 | Tool | What it does |
 |---|---|
-| `session_bridge_create` | Create a main session (current or another workspace via `workspaceId` / `cwd`); optional first prompt + `waitForReply`. |
-| `session_bridge_send` | Send a message (`mode=queue`/`steer`); optional wait-for-reply. |
-| `session_bridge_wait` | Wait for new output after `sinceSeq`: `waitFor=reply` (text) or `waitFor=segment` (any completed step, no full-turn wait); optional `requireTurnEnd`. |
+| `session_bridge_create` | Create a main session (current or another workspace via `workspaceId` / `cwd`); optional first prompt + `waitForReply`; async creates return a `sinceSeq` anchor. |
+| `session_bridge_send` | Send a message (`mode=queue`/`steer`); optional wait-for-reply; async sends return a `sinceSeq` anchor. |
+| `session_bridge_wait` | Wait for new output after `sinceSeq` (default: latest seq at call time; `-1` counts existing events): `waitFor=reply` (text) or `waitFor=segment` (any completed step, no full-turn wait); optional `requireTurnEnd`; falls back to the pre-existing reply with `stale` when nothing new arrives. |
 | `session_bridge_read` | Read messages — live or offline; `sinceSeq` paging, `role` filter, `limit`. |
 | `session_bridge_segments` | Read completed output segments (each finished assistant step) incrementally by paragraph — live or offline. |
 | `session_bridge_resume` | Bring a persisted session back online (idempotent). |
 | `session_bridge_find` | Find sessions by title / id / workspace / directory across workspaces. |
-| `session_bridge_status` | Read a session's live progress (running, open turn, stall detection, pending work, latest reply) plus live/finalized chain-of-thought (`reasoning` param). |
+| `session_bridge_status` | Read a session's live progress (running, open turn, stall detection, pending work, latest reply) plus live/finalized chain-of-thought (`reasoning` param); `[STALLED]` is shown for running sessions only. |
 | `session_bridge_cancel` | Stop a running session (abort active turn; clear queued/steering work unless `keepInbox`). |
 | `session_bridge_monitor_start` | Start a background watchdog on a main session (poll, nudge, correct, cancel, wrap up); supports chain-of-thought `coRules` (e.g. reasoning not-contains "I'm" → cancel). |
 | `session_bridge_monitor_stop` | Stop a watchdog (keep the session itself running). |
@@ -264,7 +279,7 @@ registration and junction; not re-assembled on restart).
 | `session_bridge_archived` | List the archive set, optionally resolving titles. |
 
 All tools return lossless JSON; wait-style tools never throw on timeout — they
-return a `timedOut` / `aborted` flag.
+return a `timedOut` / `aborted` / `stale` flag.
 
 ## Project layout
 
@@ -277,6 +292,7 @@ src/
   registry.ts bridge-side title/workspace registry (~/.dsh/session-bridge-registry.json)
 scripts/
   build.sh    type-check + link types against the DSH checkout
+  test-bridge-core.mjs  wait/stall regression tests (npm test)
 ```
 
 ## Lifecycle and unloading

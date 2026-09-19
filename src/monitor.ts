@@ -14,6 +14,7 @@ import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import {
   cancelLiveSession,
   getLiveAgent,
+  isStalled,
   sendLiveMessage,
   statusSnapshot,
   type BridgeStatusSnapshot,
@@ -224,9 +225,8 @@ export class SessionMonitor {
     }
 
     // 2) 卡住判定：仅对 running 会话有意义（距最近事件超过阈值）。
-    const stalled = snapshot.running === 'running'
-      && snapshot.stalledMs !== null
-      && snapshot.stalledMs > (entry.config.stalledMs ?? 60000)
+    //    判定走 core.isStalled（唯一真源，与 session_bridge_status 的 [STALLED] 标注一致）。
+    const stalled = isStalled(snapshot.running, snapshot.stalledMs, entry.config.stalledMs ?? 60000)
     if (stalled) {
       entry.stuckCount += 1
       entry.lastActionAt = Date.now()
