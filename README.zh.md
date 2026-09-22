@@ -1,5 +1,7 @@
 # dsh-session-bridge — 会话桥（Session bridge）
 
+当前适配 DSH **0.1.7-alpha.1**，详见[兼容性变更](CHANGELOG.md)。
+
 一个 [DSH](https://www.deepseek.com) 插件：让当前 agent 能通过提示词驱动其它真实的 DSH 会话——
 创建主会话、向任意会话发消息、等待并读取回复、恢复离线会话、跨工作区按名称或 id 查找会话。
 在此之上，它还能**监控并调度**一个主任务（观察进度、卡住时催办、偏离时纠偏、必要时终止），
@@ -86,18 +88,19 @@
 
 - [Node.js](https://nodejs.org) ≥ 20
 - [pnpm](https://pnpm.io)
-- DSH ≥ `0.1.0-rc.6`
+- DSH `0.1.7-alpha.1` (`^0.1.7-0`).
 
 ## 构建
 
 ```bash
-# 类型检查 + 打包 host bundle + 生成 tgz（DSH_CHECKOUT 指向 dsh 源码 checkout）
-bash scripts/build.sh && npm run build:client
+# 安装锁定的 DSH 发布依赖，再类型检查并构建
+pnpm install --frozen-lockfile
+pnpm build
 
 # 针对"实际安装的 dsh"做类型检查（不需要 checkout）
 npm run check:compat
 
-# 核心 wait/卡住判定的回归测试（Node 类型擦除直跑 src/core.ts，零依赖）
+# 核心 wait/卡住判定的回归测试（Node 类型擦除直跑 src/core.ts）
 npm test
 
 # 或经注入器工具链

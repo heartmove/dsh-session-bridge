@@ -35,37 +35,9 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: pnpm
 
-      # Same registry-resolvable pin as ci.yml — the code targets the DSH
-      # 0.1.6-alpha.2 API surface (assistant/attempt stream records /
-      # persistence open-read / V3 session format), so resolve the
-      # @deepseek-ai dsh-* prerelease line explicitly from the registry
-      # instead of a local harness checkout.
-      # Bump together with the code when you migrate.
-      - name: Write registry-resolvable pnpm-workspace overrides
-        shell: bash
-        run: |
-          cat > pnpm-workspace.yaml <<'EOF'
-          packages:
-            - .
-          overrides:
-            '@deepseek-ai/dsh-agent': npm:@deepseek-ai/dsh-agent@0.1.6-alpha.2
-            '@deepseek-ai/dsh-agent-presets': npm:@deepseek-ai/dsh-agent-presets@0.1.6-alpha.2
-            '@deepseek-ai/dsh-home-paths': npm:@deepseek-ai/dsh-home-paths@0.1.6-alpha.2
-            '@deepseek-ai/dsh-llm': npm:@deepseek-ai/dsh-llm@0.1.6-alpha.2
-            '@deepseek-ai/dsh-session': npm:@deepseek-ai/dsh-session@0.1.6-alpha.2
-            '@deepseek-ai/dsh-session-persistence': npm:@deepseek-ai/dsh-session-persistence@0.1.6-alpha.2
-            '@deepseek-ai/dsh-tools': npm:@deepseek-ai/dsh-tools@0.1.6-alpha.2
-            '@deepseek-ai/dsh-workspace': npm:@deepseek-ai/dsh-workspace@0.1.6-alpha.2
-            '@deepseek-ai/dsh-util-values': npm:@deepseek-ai/dsh-util-values@0.1.6-alpha.2
-            '@deepseek-ai/dsh-scope': npm:@deepseek-ai/dsh-scope@0.1.6-alpha.2
-            '@deepseek-ai/dsh-brand': npm:@deepseek-ai/dsh-brand@0.1.6-alpha.2
-            '@deepseek-ai/schemastery': npm:@deepseek-ai/schemastery@3.18.2
-            '@deepseek-ai/cordis': npm:@deepseek-ai/cordis@4.0.2
-            cordis: npm:@deepseek-ai/cordis@4.0.2
-          EOF
-
+      # The lockfile and exact dev dependencies target DSH 0.1.7-alpha.1.
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Typecheck
         run: pnpm typecheck
@@ -74,7 +46,7 @@ jobs:
         run: pnpm test
 
       - name: Build
-        run: pnpm build:client
+        run: pnpm build
 
       - name: Resolve package version from tag
         id: version

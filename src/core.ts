@@ -108,6 +108,8 @@ export function asEventList(events: unknown): readonly SessionEvent[] {
  * - dsh 0.1.5 之后：`inspect` 已删除，改用 `open(id, 'read')` → `handle.read()`
  *   （+ `handle.header`），读句柄不抢写所有权，读后必须 close()。
  * 会话不存在时两个 API 都抛错，调用方按原语义处理。
+ * DSH 0.1.7 的持久化层在 open/read 时准备 V3→V4 迁移，可能补入
+ * interrupted turn/end 并重新编号。始终消费返回的逻辑事件，不读取物理 JSONL。
  */
 export async function inspectPersistedSession(ctx: Context, id: string): Promise<{ events: readonly SessionEvent[]; meta: { cwd?: string } }> {
   const persistence = ctx.sessionPersistence as unknown as {

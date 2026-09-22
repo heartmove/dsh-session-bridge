@@ -153,6 +153,16 @@ function artifactProvenance() {
   const roots = new Set()
   for (const source of Array.isArray(map.sources) ? map.sources : []) {
     if (typeof source !== 'string') continue
+    // pnpm shortens long virtual-store directory names on Windows. Read the
+    // package manifest instead of treating a truncated `@0.1._hash` as a version.
+    const packageRoot = source.match(/^(.*[/\\]node_modules[/\\]@deepseek-ai[/\\]dsh-[^/\\]+)[/\\]/)
+    if (packageRoot !== null) {
+      const manifest = readJson(resolve(ROOT, 'lib', packageRoot[1], 'package.json'))
+      if (typeof manifest?.version === 'string') {
+        versions.add(manifest.version)
+        continue
+      }
+    }
     // Source checkout: <root>/packages/... or <root>/vendor/... (relative to the map in lib/).
     const checkout = source.match(/^(.*?)[/\\](?:packages|vendor)[/\\]/)
     if (checkout !== null) { roots.add(resolve(ROOT, 'lib', checkout[1])); continue }
@@ -163,7 +173,7 @@ function artifactProvenance() {
     const registry = source.match(/[\\/]\.pnpm[\\/]@deepseek-ai\+dsh-[a-z0-9-]+@([^\\/]+)[\\/]node_modules/)
     if (registry !== null) {
       const version = registry[1].replace(/_.*$/, '')
-      if (/^\d/.test(version)) versions.add(version)
+      if (/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(version)) versions.add(version)
     }
   }
   for (const root of roots) {

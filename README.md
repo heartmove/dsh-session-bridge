@@ -1,5 +1,7 @@
 # dsh-session-bridge — 会话桥 (Session bridge)
 
+Targets DSH **0.1.7-alpha.1**. See [compatibility changes](CHANGELOG.md).
+
 A [DSH](https://www.deepseek.com) plugin that lets the current agent drive
 other real DSH sessions directly from a prompt — create sessions, send
 messages to any session, wait for and read replies, resume offline sessions,
@@ -123,39 +125,26 @@ time — not just its final reply — and act on it:
 
 - [Node.js](https://nodejs.org) ≥ 20
 - [pnpm](https://pnpm.io)
-- DSH ≥ `0.1.0-rc.6`
+- DSH `0.1.7-alpha.1` (`^0.1.7-0`).
 
 ## Build
 
 ```bash
-# type-check + bundle the host build + pack a tgz (DSH_CHECKOUT points at the dsh source checkout)
-bash scripts/build.sh && npm run build:client
+# Install locked DSH release packages, then type-check and build
+pnpm install --frozen-lockfile
+pnpm build
 
 # type-check src/ against the dsh that is actually installed (no checkout needed)
 npm run check:compat
 
-# regression tests for the wait/stall core logic (Node type stripping, no deps)
+# regression tests for the wait/stall core logic (Node type stripping)
 npm test
 
 # via the injector toolchain
 dev_build_plugin dsh-session-bridge
 ```
 
-`build.sh` type-links against a local DSH checkout and is only for local dev.
-That checkout frequently lags the harness the plugin is loaded into, so a green
-`build.sh` does **not** prove the plugin works on the running DSH — `build.sh`
-warns when the two versions differ. Use `npm run check:compat` for that: it
-type-checks `src/` against the `lib/types/*.d.ts` shipped inside the installed
-DSH package, then reads the built `lib/index.js.map` to verify the
-self-contained bundle actually inlined that same DSH version. (Type-checking
-alone is not enough — a stale checkout type-checks green while the artifact
-ships old DSH code.)
-
-The GitHub Actions CI (`ci.yml`) instead resolves the `@deepseek-ai/dsh-*`
-prereleases from the registry — pinned to the `0.1.6-alpha.2` line, which is
-the DSH API surface this code targets — then runs `pnpm typecheck` and
-`pnpm build:client` (the self-contained `tsdown` bundle). Bump that pin
-together with the code when you migrate to a newer DSH API.
+Builds use the locked 0.1.7-alpha.1 registry packages; no source checkout is required. `check:compat` verifies the installed harness types and bundle provenance. CI uses the same lockfile.
 
 ## Deploy
 
@@ -291,7 +280,7 @@ src/
   monitor.ts  the background watchdog loop (statusSnapshot + rules + optional LLM judge)
   registry.ts bridge-side title/workspace registry (~/.dsh/session-bridge-registry.json)
 scripts/
-  build.sh    type-check + link types against the DSH checkout
+  build.sh    compatibility wrapper for npm run build
   test-bridge-core.mjs  wait/stall regression tests (npm test)
 ```
 
