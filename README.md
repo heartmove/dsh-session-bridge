@@ -1,6 +1,6 @@
 # dsh-session-bridge — 会话桥 (Session bridge)
 
-Targets DSH **0.1.7-alpha.1**. See [compatibility changes](CHANGELOG.md).
+Targets DSH **0.1.7-alpha.2**. See [compatibility changes](CHANGELOG.md).
 
 A [DSH](https://www.deepseek.com) plugin that lets the current agent drive
 other real DSH sessions directly from a prompt — create sessions, send
@@ -64,7 +64,8 @@ action does.
 - **Archive sessions.** `session_bridge_archive` adds a session to the DSH
   workspace archive set (hidden from every grouping surface, history and
   workspace position preserved). `session_bridge_archived` lists the archive
-  set, optionally resolving titles.
+  set, optionally resolving titles; a session whose title cannot be resolved is
+  listed without one instead of failing the whole call.
 
 ## Monitoring worker
 
@@ -125,7 +126,7 @@ time — not just its final reply — and act on it:
 
 - [Node.js](https://nodejs.org) ≥ 20
 - [pnpm](https://pnpm.io)
-- DSH `0.1.7-alpha.1` (`^0.1.7-0`).
+- DSH `0.1.7-alpha.2` (`^0.1.7-0`).
 
 ## Build
 
@@ -137,14 +138,14 @@ pnpm build
 # type-check src/ against the dsh that is actually installed (no checkout needed)
 npm run check:compat
 
-# regression tests for the wait/stall core logic (Node type stripping)
+# regression tests: wait/stall core, the archived tool handler, V3→V4 migration
 npm test
 
 # via the injector toolchain
 dev_build_plugin dsh-session-bridge
 ```
 
-Builds use the locked 0.1.7-alpha.1 registry packages; no source checkout is required. `check:compat` verifies the installed harness types and bundle provenance. CI uses the same lockfile.
+Builds use the locked 0.1.7-alpha.2 registry packages; no source checkout is required. `check:compat` verifies the installed harness types and bundle provenance. CI uses the same lockfile.
 
 ## Deploy
 

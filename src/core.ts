@@ -700,6 +700,23 @@ export function statusSnapshot(ctx: Context, agent: LiveAgentLike): BridgeStatus
   }
 }
 
+/**
+ * 组装 `session_bridge_archived` 的返回条目：只有当标题确实解析出来时才带上
+ * `title` 字段。显式写入 `title: undefined` 会让工具返回值不再是 lossless JSON，
+ * 宿主会因此拒绝**整个**工具结果（真实事故：归档集合里存在"无用户消息 / 无
+ * session/title 事件"的会话时，`resolveTitles: true` 必然报
+ * `value is not lossless JSON`）。标题缺失只是信息缺失，不应让工具整体失败。
+ */
+export function archivedEntries(
+  ids: readonly string[],
+  titles: ReadonlyMap<string, string | undefined>,
+): Array<{ sessionId: string; title?: string }> {
+  return ids.map((sessionId) => {
+    const title = titles.get(sessionId)
+    return title === undefined || title === '' ? { sessionId } : { sessionId, title }
+  })
+}
+
 /** 取 live agent（跨工具/监控共用）。不存在返回 undefined。 */
 export function getLiveAgent(ctx: Context, sessionId: string): LiveAgentLike | undefined {
   const agents = ctx.agents as unknown as { get(id: string): LiveAgentLike | undefined }

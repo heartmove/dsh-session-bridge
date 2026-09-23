@@ -1,6 +1,6 @@
 # dsh-session-bridge — 会话桥（Session bridge）
 
-当前适配 DSH **0.1.7-alpha.1**，详见[兼容性变更](CHANGELOG.md)。
+当前适配 DSH **0.1.7-alpha.2**，详见[兼容性变更](CHANGELOG.md)。
 
 一个 [DSH](https://www.deepseek.com) 插件：让当前 agent 能通过提示词驱动其它真实的 DSH 会话——
 创建主会话、向任意会话发消息、等待并读取回复、恢复离线会话、跨工作区按名称或 id 查找会话。
@@ -41,7 +41,8 @@
   `session_bridge_monitor_start` 运行一个**后台守护循环**，轮询任务、卡住时催办、偏离时纠偏、
   持续卡住则终止、完成即收尾。
 - **归档会话。** `session_bridge_archive` 把会话加入 DSH workspace 归档集合（从所有分组视图隐藏，
-  历史与位置保留）；`session_bridge_archived` 列出归档集合，可选解析标题。
+  历史与位置保留）；`session_bridge_archived` 列出归档集合，可选解析标题——解析不出标题的会话
+  只省略标题，不会让整个调用失败。
 
 ## 监控守护循环
 
@@ -88,7 +89,7 @@
 
 - [Node.js](https://nodejs.org) ≥ 20
 - [pnpm](https://pnpm.io)
-- DSH `0.1.7-alpha.1` (`^0.1.7-0`).
+- DSH `0.1.7-alpha.2` (`^0.1.7-0`).
 
 ## 构建
 
@@ -100,7 +101,7 @@ pnpm build
 # 针对"实际安装的 dsh"做类型检查（不需要 checkout）
 npm run check:compat
 
-# 核心 wait/卡住判定的回归测试（Node 类型擦除直跑 src/core.ts）
+# 核心 wait/卡住判定、archived 工具 handler、V3→V4 迁移的回归测试（Node 类型擦除直跑 src/）
 npm test
 
 # 或经注入器工具链

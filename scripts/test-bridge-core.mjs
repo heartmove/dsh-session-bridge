@@ -10,7 +10,7 @@
  * read path core.sessionEvents() probes (`snapshotEvents()`).
  */
 import assert from 'node:assert/strict'
-import { foldMessages, isStalled, maxSeq, waitForReply } from '../src/core.ts'
+import { archivedEntries, foldMessages, isStalled, maxSeq, waitForReply } from '../src/core.ts'
 
 let passed = 0
 let failed = 0
@@ -138,6 +138,31 @@ await test('wait sinceSeq=-1 anchor (create path): existing reply counts as new'
   assert.equal(result.stale, false)
   assert.equal(result.timedOut, false)
   assert.ok(Date.now() - started < 1_000, 'should return without waiting (nothing to wait for)')
+})
+
+// --- archived entries: the tool value must stay lossless JSON -----------------
+await test('archivedEntries: unresolved titles are omitted (not `undefined`) — lossless JSON', () => {
+  // 回归：归档集合里存在"无用户消息 / 无 session/title 事件"的会话时，旧实现写
+  // `item.title = undefined`，宿主以 "value is not lossless JSON" 拒绝整个工具结果。
+  const entries = archivedEntries(['resolved', 'unresolved', 'empty'], new Map([
+    ['resolved', 'Named session'],
+    ['empty', ''],
+    ['unresolved', undefined],
+  ]))
+  assert.deepEqual(entries, [
+    { sessionId: 'resolved', title: 'Named session' },
+    { sessionId: 'unresolved' },
+    { sessionId: 'empty' },
+  ])
+  // 有自有 undefined 属性时 JSON 往返会丢字段，这个断言正是旧实现的失败点。
+  assert.deepEqual(JSON.parse(JSON.stringify(entries)), entries)
+  assert.equal(Object.hasOwn(entries[1], 'title'), false)
+})
+
+await test('archivedEntries: no titles at all still round-trips', () => {
+  const entries = archivedEntries(['a', 'b'], new Map())
+  assert.deepEqual(JSON.parse(JSON.stringify(entries)), entries)
+  assert.deepEqual(entries, [{ sessionId: 'a' }, { sessionId: 'b' }])
 })
 
 // --- sanity -------------------------------------------------------------------

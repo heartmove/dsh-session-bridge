@@ -17,6 +17,7 @@ import type {
   LiveAgentLike,
 } from './core.ts'
 import {
+  archivedEntries,
   attachSessionToWorkspace,
   foldMessages,
   inspectPersistedSession,
@@ -1145,25 +1146,25 @@ function registerArchive(env: BridgeEnv): void {
     },
     async execute(args: { resolveTitles?: boolean }) {
       const archived = env.ctx.workspaceRegistry.archivedSessionIds.map(String)
-      const items: Array<{ sessionId: string; title?: string }> = archived.map((id) => ({ sessionId: id }))
-      if (args.resolveTitles === true && items.length > 0) {
-        const registryTitles = new Map<string, string>()
-        try {
-          const records = await env.registry.all()
-          for (const rec of records) if (rec.title !== undefined) registryTitles.set(rec.sessionId, rec.title)
-        } catch { /* best-effort */ }
-        for (const item of items) {
-          if (registryTitles.has(item.sessionId)) {
-            item.title = registryTitles.get(item.sessionId)
-            continue
-          }
-          try {
-            const inspection = await inspectPersistedSession(env.ctx, item.sessionId)
-            item.title = titleOf(inspection.events)
-          } catch { /* offline title unavailable */ }
-        }
+      if (args.resolveTitles !== true || archived.length === 0) {
+        return asJson({ items: archivedEntries(archived, new Map()), total: archived.length })
       }
-      return asJson({ items, total: items.length })
+      // 标题来源优先级：bridge 登记表里的别名 > 会话日志里的标题/首条用户消息。
+      // 解析不出来的会话就**不带** title 字段返回（绝不写 undefined —— 那会让整个
+      // 工具返回值不再是 lossless JSON，宿主会拒绝它，标题缺失不该升级成整体失败）。
+      const titles = new Map<string, string | undefined>()
+      try {
+        const records = await env.registry.all()
+        for (const rec of records) if (rec.title !== undefined) titles.set(rec.sessionId, rec.title)
+      } catch { /* best-effort */ }
+      for (const sessionId of archived) {
+        if (titles.get(sessionId) !== undefined) continue
+        try {
+          const inspection = await inspectPersistedSession(env.ctx, sessionId)
+          titles.set(sessionId, titleOf(inspection.events))
+        } catch { /* offline title unavailable */ }
+      }
+      return asJson({ items: archivedEntries(archived, titles), total: archived.length })
     },
   }))
 }
