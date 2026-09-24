@@ -80,7 +80,94 @@ const tools = captureTools()
 
 await test('registerBridgeTools registers the archived tool', () => {
   assert.ok(tools.has('session_bridge_archived'))
-  assert.equal(tools.size, 14)
+  assert.ok(tools.has('session_bridge_archive'))
+  assert.ok(tools.has('session_bridge_unarchive'))
+  assert.equal(tools.size, 15)
+})
+
+/**
+ * A registry stub that behaves like the real one for the archive verbs: without
+ * `stopActivity` an active session refuses the archive, and the archive set is
+ * mutable so unarchive can be observed. Records every call for assertions.
+ */
+function archiveHarness(initial = []) {
+  const archive = [...initial]
+  const calls = []
+  const registered = new Map()
+  const ctx = {
+    tools: { register: (tool) => { registered.set(tool.name, tool) } },
+    workspaceRegistry: {
+      get archivedSessionIds() { return archive },
+      async archiveSession(id, options) {
+        calls.push({ verb: 'archive', id, options })
+        if (options?.stopActivity !== true) throw new Error('the session is active (turn)')
+        archive.push(id)
+      },
+      async unarchiveSession(id) {
+        calls.push({ verb: 'unarchive', id })
+        const at = archive.indexOf(id)
+        if (at !== -1) archive.splice(at, 1)
+      },
+      list: () => [],
+      get: () => undefined,
+      resolveByPath: async () => undefined,
+    },
+    sessionPersistence: { open: async () => ({ header: {}, read: async () => ({ events: [] }), close: async () => {} }) },
+    agents: { get: () => undefined, list: () => [] },
+    setInterval: () => 0,
+    clearInterval: () => {},
+    effect: () => {},
+  }
+  const registry = { all: async () => [], record() {}, touch() {}, load: async () => {}, persist: async () => {} }
+  const monitor = { dispose() {}, start() {}, stop: () => false, list: () => [] }
+  registerBridgeTools({ ctx, registry, monitor })
+  return { registered, calls, archive }
+}
+
+await test('archive: an active session is refused with a stopActivity hint', async () => {
+  const h = archiveHarness()
+  await assert.rejects(
+    () => h.registered.get('session_bridge_archive').execute({ sessionId: 'busy' }, {}),
+    (error) => error instanceof Error && error.message.includes('the session is active') && error.message.includes('stopActivity: true'),
+  )
+  assert.deepEqual(h.calls, [{ verb: 'archive', id: 'busy', options: undefined }])
+  assert.deepEqual(h.archive, [])
+})
+
+await test('archive: stopActivity passes through and archives the active session', async () => {
+  const h = archiveHarness(['old'])
+  const value = await h.registered.get('session_bridge_archive').execute({ sessionId: 'busy', stopActivity: true }, {})
+  assert.deepEqual(h.calls, [{ verb: 'archive', id: 'busy', options: { stopActivity: true } }])
+  assert.deepEqual(h.archive, ['old', 'busy'])
+  assert.equal(value.stopActivity, true)
+  assert.deepEqual(value.archivedSessionIds, ['old', 'busy'])
+  assert.deepEqual(JSON.parse(JSON.stringify(value)), value)
+})
+
+await test('unarchive: drops the id and returns the remaining archive set', async () => {
+  const h = archiveHarness(['a', 'b'])
+  const value = await h.registered.get('session_bridge_unarchive').execute({ sessionId: 'a' }, {})
+  assert.deepEqual(h.calls, [{ verb: 'unarchive', id: 'a' }])
+  assert.deepEqual(h.archive, ['b'])
+  assert.deepEqual(value.archivedSessionIds, ['b'])
+  assert.equal(value.totalArchived, 1)
+  assert.deepEqual(JSON.parse(JSON.stringify(value)), value)
+})
+
+await test('unarchive: a not-archived id is an idempotent no-op', async () => {
+  const h = archiveHarness(['a'])
+  const value = await h.registered.get('session_bridge_unarchive').execute({ sessionId: 'missing' }, {})
+  assert.deepEqual(h.archive, ['a'])
+  assert.deepEqual(value.archivedSessionIds, ['a'])
+})
+
+await test('unarchive: an empty sessionId is rejected before touching the registry', async () => {
+  const h = archiveHarness(['a'])
+  await assert.rejects(
+    () => h.registered.get('session_bridge_unarchive').execute({ sessionId: '   ' }, {}),
+    (error) => error instanceof Error && error.message.includes('invalid sessionId'),
+  )
+  assert.deepEqual(h.calls, [])
 })
 
 await test('resolveTitles: unresolved titles stay absent — the value is lossless JSON', async () => {

@@ -35,7 +35,7 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: pnpm
 
-      # The lockfile and exact dev dependencies target DSH 0.1.7-alpha.1.
+      # The lockfile and exact dev dependencies target DSH 0.1.7-rc.1.
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -47,6 +47,11 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      # The artifact itself must mount: check:compat is not run here, so this is
+      # the only pre-publish proof that lib/index.js loads.
+      - name: Smoke test the built bundle
+        run: pnpm smoke
 
       - name: Resolve package version from tag
         id: version

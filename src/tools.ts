@@ -1095,6 +1095,7 @@ function registerCancel(env: BridgeEnv): void {
 
 interface ArchiveArgs {
   sessionId: string
+  stopActivity?: boolean
 }
 
 function renderArchived(ids: readonly string[]): string {
@@ -1105,24 +1106,58 @@ function renderArchived(ids: readonly string[]): string {
 function registerArchive(env: BridgeEnv): void {
   env.ctx.tools.register(defineTool({
     name: 'session_bridge_archive',
-    description: 'Archive one session: add it to the workspace registry\'s global archive set so it is hidden from every grouping surface in the UI (Un/grouped, workspaces) while its session history and workspace position are preserved. Mirrors the workspace controller archiveSession. The session must exist (live or in session persistence). Returns the complete resulting archive set.',
+    description: 'Archive one session: add it to the workspace registry\'s global archive set so it is hidden from every grouping surface in the UI (Un/grouped, workspaces) while its session history and workspace position are preserved. Mirrors the workspace controller archiveSession. The session must exist (live or in session persistence) and, without stopActivity, must be inactive — otherwise the archive is refused with "the session is active". Returns the complete resulting archive set.',
     parameters: {
       sessionId: { type: 'string', required: true, description: 'Session id to archive.' },
+      stopActivity: { type: 'boolean', description: 'When true, stop the session\'s running work (turn, subagents, jobs, schedules) instead of refusing the archive because work is active (default false). The archive is written first and the stops are requested afterwards, exactly like the UI archive action.' },
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
       render: (_args, value) => {
         const v = value as Record<string, unknown>
-        return [{ type: 'text' as const, text: 'archived ' + String(v.sessionId) + '\n' + renderArchived((v.archivedSessionIds as string[] | undefined) ?? []) }]
+        const note = v.stopActivity === true ? ' (stopped running work)' : ''
+        return [{ type: 'text' as const, text: 'archived ' + String(v.sessionId) + note + '\n' + renderArchived((v.archivedSessionIds as string[] | undefined) ?? []) }]
+      },
+    },
+    async execute(args: ArchiveArgs) {
+      if (typeof args.sessionId !== 'string' || args.sessionId.trim() === '') throw new Error('invalid sessionId: expected a non-empty string')
+      const sessionId = args.sessionId.trim()
+      const stopActivity = args.stopActivity === true
+      try {
+        // `stopActivity` is the official escape hatch for a session whose work is
+        // still running: without it the registry refuses the archive with
+        // WorkspaceActiveSessionError, which made archiving a live target
+        // impossible through the bridge.
+        await env.ctx.workspaceRegistry.archiveSession(sessionId as SessionId, stopActivity ? { stopActivity: true } : undefined)
+      } catch (error) {
+        const hint = stopActivity ? '' : ' (pass stopActivity: true to archive it anyway and stop its running work)'
+        throw new Error('cannot archive session ' + JSON.stringify(sessionId) + ': ' + (error instanceof Error ? error.message : String(error)) + hint)
+      }
+      const archived = env.ctx.workspaceRegistry.archivedSessionIds.map(String)
+      return asJson({ sessionId, stopActivity, archivedSessionIds: archived, totalArchived: archived.length })
+    },
+  }))
+
+  env.ctx.tools.register(defineTool({
+    name: 'session_bridge_unarchive',
+    description: 'Unarchive one session: drop it from the workspace registry\'s global archive set so it is visible again on every grouping surface at its recorded position (its workspace accounting is never touched by archiving, so the slot is still there). Mirrors the workspace controller unarchiveSession. An unknown or not-archived id is an idempotent no-op. Returns the complete resulting archive set.',
+    parameters: {
+      sessionId: { type: 'string', required: true, description: 'Session id to unarchive.' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => {
+        const v = value as Record<string, unknown>
+        return [{ type: 'text' as const, text: 'unarchived ' + String(v.sessionId) + '\n' + renderArchived((v.archivedSessionIds as string[] | undefined) ?? []) }]
       },
     },
     async execute(args: ArchiveArgs) {
       if (typeof args.sessionId !== 'string' || args.sessionId.trim() === '') throw new Error('invalid sessionId: expected a non-empty string')
       const sessionId = args.sessionId.trim()
       try {
-        await env.ctx.workspaceRegistry.archiveSession(sessionId as SessionId)
+        await env.ctx.workspaceRegistry.unarchiveSession(sessionId as SessionId)
       } catch (error) {
-        throw new Error('cannot archive session ' + JSON.stringify(sessionId) + ': ' + (error instanceof Error ? error.message : String(error)))
+        throw new Error('cannot unarchive session ' + JSON.stringify(sessionId) + ': ' + (error instanceof Error ? error.message : String(error)))
       }
       const archived = env.ctx.workspaceRegistry.archivedSessionIds.map(String)
       return asJson({ sessionId, archivedSessionIds: archived, totalArchived: archived.length })

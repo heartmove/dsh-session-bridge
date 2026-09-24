@@ -1,6 +1,6 @@
 # dsh-session-bridge — 会话桥（Session bridge）
 
-当前适配 DSH **0.1.7-alpha.2**，详见[兼容性变更](CHANGELOG.md)。
+当前适配 DSH **0.1.7-rc.1**，详见[兼容性变更](CHANGELOG.md)。
 
 一个 [DSH](https://www.deepseek.com) 插件：让当前 agent 能通过提示词驱动其它真实的 DSH 会话——
 创建主会话、向任意会话发消息、等待并读取回复、恢复离线会话、跨工作区按名称或 id 查找会话。
@@ -40,8 +40,10 @@
   （空闲会话没有进展是正常状态，与守护循环判定一致）。`session_bridge_cancel` 停止一个运行中的会话；
   `session_bridge_monitor_start` 运行一个**后台守护循环**，轮询任务、卡住时催办、偏离时纠偏、
   持续卡住则终止、完成即收尾。
-- **归档会话。** `session_bridge_archive` 把会话加入 DSH workspace 归档集合（从所有分组视图隐藏，
-  历史与位置保留）；`session_bridge_archived` 列出归档集合，可选解析标题——解析不出标题的会话
+- **归档 / 取消归档会话。** `session_bridge_archive` 把会话加入 DSH workspace 归档集合（从所有分组视图隐藏，
+  历史与位置保留）——目标仍在跑时默认拒绝归档，传 `stopActivity: true` 则先归档再按官方路径停掉它的
+  运行中工作（turn、子 agent、job、schedule）；`session_bridge_unarchive` 把会话移出归档集合、回到原位
+  置重新可见；`session_bridge_archived` 列出归档集合，可选解析标题——解析不出标题的会话
   只省略标题，不会让整个调用失败。
 
 ## 监控守护循环
@@ -89,7 +91,7 @@
 
 - [Node.js](https://nodejs.org) ≥ 20
 - [pnpm](https://pnpm.io)
-- DSH `0.1.7-alpha.2` (`^0.1.7-0`).
+- DSH `0.1.7-rc.1` (`^0.1.7-0`).
 
 ## 构建
 
@@ -220,7 +222,8 @@ dev_inject_plugin D:\code\dsh-session-bridge
 | `session_bridge_monitor_start` | 对一个主会话启动后台守护（轮询、催办、纠偏、终止、收尾）；支持思维链 `coRules`（如 reasoning not-contains "I'm" → cancel）。 |
 | `session_bridge_monitor_stop` | 停止守护（会话本身不终止）。 |
 | `session_bridge_monitor_list` | 列出活动守护及其状态。 |
-| `session_bridge_archive` | 归档会话（从分组隐藏；历史与位置保留）。 |
+| `session_bridge_archive` | 归档会话（从分组隐藏；历史与位置保留）；对运行中的会话需显式 `stopActivity: true`。 |
+| `session_bridge_unarchive` | 取消归档（回到原位置重新可见；未知/未归档 id 为幂等空操作）。 |
 | `session_bridge_archived` | 列出归档集合，可选解析标题。 |
 
 所有工具输出 lossless JSON；等待类工具超时不抛错，返回 `timedOut` / `aborted` / `stale` 标记。
@@ -237,6 +240,9 @@ src/
 scripts/
   build.sh    类型检查 + 链接 DSH checkout 类型
   test-bridge-core.mjs  wait/卡住判定回归测试（npm test）
+  test-tools-archived.mjs  归档 / 取消归档 + archived handler 回归测试（npm test）
+  check-dsh-compat.mjs  对已安装 DSH 做 src/ 类型检查 + 校验产物来源（npm run check:compat）
+  smoke-bundle.mjs  挂载构建产物 lib/index.js 并断言工具全部注册（npm run smoke）
 ```
 
 ## 生命周期与卸载

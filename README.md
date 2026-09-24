@@ -1,6 +1,6 @@
 # dsh-session-bridge — 会话桥 (Session bridge)
 
-Targets DSH **0.1.7-alpha.2**. See [compatibility changes](CHANGELOG.md).
+Targets DSH **0.1.7-rc.1**. See [compatibility changes](CHANGELOG.md).
 
 A [DSH](https://www.deepseek.com) plugin that lets the current agent drive
 other real DSH sessions directly from a prompt — create sessions, send
@@ -61,9 +61,13 @@ action does.
   watchdog loop** that polls the task, nudges it when it stalls, corrects it
   when it drifts, terminates it after it stays stuck, and wraps up when it
   finishes.
-- **Archive sessions.** `session_bridge_archive` adds a session to the DSH
-  workspace archive set (hidden from every grouping surface, history and
-  workspace position preserved). `session_bridge_archived` lists the archive
+- **Archive / unarchive sessions.** `session_bridge_archive` adds a session to
+  the DSH workspace archive set (hidden from every grouping surface, history and
+  workspace position preserved); an active target is refused unless
+  `stopActivity: true` is passed, which archives first and then stops its
+  running work (turn, subagents, jobs, schedules) through the official path.
+  `session_bridge_unarchive` drops it from the archive set so it reappears at
+  its recorded position. `session_bridge_archived` lists the archive
   set, optionally resolving titles; a session whose title cannot be resolved is
   listed without one instead of failing the whole call.
 
@@ -126,7 +130,7 @@ time — not just its final reply — and act on it:
 
 - [Node.js](https://nodejs.org) ≥ 20
 - [pnpm](https://pnpm.io)
-- DSH `0.1.7-alpha.2` (`^0.1.7-0`).
+- DSH `0.1.7-rc.1` (`^0.1.7-0`).
 
 ## Build
 
@@ -145,7 +149,7 @@ npm test
 dev_build_plugin dsh-session-bridge
 ```
 
-Builds use the locked 0.1.7-alpha.2 registry packages; no source checkout is required. `check:compat` verifies the installed harness types and bundle provenance. CI uses the same lockfile.
+Builds use the locked 0.1.7-rc.1 registry packages; no source checkout is required. `check:compat` verifies the installed harness types and bundle provenance. CI uses the same lockfile.
 
 ## Deploy
 
@@ -265,7 +269,8 @@ registration and junction; not re-assembled on restart).
 | `session_bridge_monitor_start` | Start a background watchdog on a main session (poll, nudge, correct, cancel, wrap up); supports chain-of-thought `coRules` (e.g. reasoning not-contains "I'm" → cancel). |
 | `session_bridge_monitor_stop` | Stop a watchdog (keep the session itself running). |
 | `session_bridge_monitor_list` | List active watchdogs and their state. |
-| `session_bridge_archive` | Archive a session (hidden from groupings; history and position preserved). |
+| `session_bridge_archive` | Archive a session (hidden from groupings; history and position preserved); requires `stopActivity: true` for a running one. |
+| `session_bridge_unarchive` | Unarchive a session (visible again at its recorded position; unknown ids are a no-op). |
 | `session_bridge_archived` | List the archive set, optionally resolving titles. |
 
 All tools return lossless JSON; wait-style tools never throw on timeout — they
@@ -283,6 +288,9 @@ src/
 scripts/
   build.sh    compatibility wrapper for npm run build
   test-bridge-core.mjs  wait/stall regression tests (npm test)
+  test-tools-archived.mjs  archive/unarchive + archived-handler regression tests (npm test)
+  check-dsh-compat.mjs  type-check src/ against installed DSH + verify bundle provenance (npm run check:compat)
+  smoke-bundle.mjs  mount the built lib/index.js and assert every tool registers (npm run smoke)
 ```
 
 ## Lifecycle and unloading
