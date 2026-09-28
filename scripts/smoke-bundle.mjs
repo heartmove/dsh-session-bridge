@@ -76,6 +76,29 @@ assert.deepEqual(unarchived.archivedSessionIds, [])
 assert.equal(unarchived.totalArchived, 0)
 assert.deepEqual(JSON.parse(JSON.stringify(unarchived)), unarchived)
 
+// The archive set grows without bound (the author's own profile holds 200+ ids),
+// so the artifact must summarize the set instead of echoing every id, and
+// session_bridge_archived must window it. Both are artifact-level contracts:
+// src/ tests cannot catch a bundle that shipped before the fix.
+const many = Array.from({ length: 25 }, (_, i) => 's' + String(i))
+archive.push(...many)
+const big = await tools.get('session_bridge_archive').execute({ sessionId: 'busy2', stopActivity: true }, {})
+assert.equal(big.totalArchived, 26)
+const bigText = tools.get('session_bridge_archive').output.render({}, big).map((block) => block.text).join('\n')
+assert.match(bigText, /total archived: 26/)
+assert.match(bigText, /\+6 earlier omitted/)
+assert.ok(bigText.includes('busy2'))
+assert.ok(!bigText.includes('s4,'))
+
+assert.ok(
+  JSON.stringify(tools.get('session_bridge_archived').parameters ?? {}).includes('limit'),
+  'session_bridge_archived must declare the limit parameter',
+)
+const windowed = await tools.get('session_bridge_archived').execute({ limit: 2 }, {})
+assert.equal(windowed.total, 26)
+assert.deepEqual(windowed.items.map((item) => item.sessionId), ['s24', 'busy2'])
+assert.deepEqual(JSON.parse(JSON.stringify(windowed)), windowed)
+
 // The artifact must not ship a stale DSH copy (the 0.3.3 regression).
 assert.ok(!readFileSync(BUNDLE, 'utf8').includes('0.1.7-alpha'), 'lib/index.js must not inline alpha DSH code')
 

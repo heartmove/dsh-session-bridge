@@ -213,9 +213,90 @@ await test('without resolveTitles: ids only, always lossless', async () => {
   const tool = tools.get('session_bridge_archived')
   const value = await tool.execute({}, {})
   assert.equal(value.total, 5)
+  assert.equal(value.returned, 5)
   assert.deepEqual(value.items, [
     { sessionId: 'titled' }, { sessionId: 'user-only' }, { sessionId: 'no-title' }, { sessionId: 'gone' }, { sessionId: 'empty-title' },
   ])
+})
+
+// 归档集合会无限增长（真实宿主里已有 200+ id）。整集合回显会把真正的结果埋进
+// 数千 token 的 id 列表，所以 archive/unarchive 只回显最近的一段 + 准确总数。
+await test('archive render: the archive set is summarized, not echoed in full', async () => {
+  const many = Array.from({ length: 26 }, (_, i) => 's' + String(i))
+  const h = archiveHarness(many)
+  const tool = h.registered.get('session_bridge_archive')
+  const value = await tool.execute({ sessionId: 'new', stopActivity: true }, {})
+  assert.equal(value.archivedSessionIds.length, 27)
+  assert.equal(value.totalArchived, 27)
+  const text = tool.output.render({}, value)[0].text
+  assert.match(text, /^archived new \(stopped running work\)\ntotal archived: 27\n/)
+  assert.match(text, /\+7 earlier omitted/)
+  assert.ok(text.includes('new'))
+  assert.ok(text.includes('s25'))
+  assert.ok(!text.includes('s6,'))
+})
+
+await test('unarchive render: same summary, and the removed id is gone', async () => {
+  const many = Array.from({ length: 26 }, (_, i) => 's' + String(i))
+  const h = archiveHarness(many)
+  const tool = h.registered.get('session_bridge_unarchive')
+  const value = await tool.execute({ sessionId: 's25' }, {})
+  assert.equal(value.totalArchived, 25)
+  const text = tool.output.render({}, value)[0].text
+  assert.match(text, /^unarchived s25\ntotal archived: 25\n/)
+  assert.ok(!text.includes('s25,'))
+})
+
+await test('archived: limit returns the newest ids and keeps the real total', async () => {
+  const tool = tools.get('session_bridge_archived')
+  const value = await tool.execute({ limit: 2 }, {})
+  assert.deepEqual(value.items.map((i) => i.sessionId), ['gone', 'empty-title'])
+  assert.equal(value.returned, 2)
+  assert.equal(value.total, 5)
+  assert.deepEqual(JSON.parse(JSON.stringify(value)), value)
+  const text = tool.output.render({ limit: 2 }, value)[0].text
+  assert.match(text, /^5 archived; newest 2:\n/)
+})
+
+await test('archived: an invalid limit is rejected before reading the registry', async () => {
+  const tool = tools.get('session_bridge_archived')
+  await assert.rejects(() => tool.execute({ limit: 0 }, {}), /invalid limit/)
+})
+
+await test('resolveTitles: only the returned ids are read from persistence', async () => {
+  let opens = 0
+  const registered = new Map()
+  const ctx = {
+    tools: { register: (tool) => { registered.set(tool.name, tool) } },
+    workspaceRegistry: {
+      archivedSessionIds: ['a', 'b', 'c', 'd'],
+      list: () => [],
+      get: () => undefined,
+      resolveByPath: async () => undefined,
+    },
+    sessionPersistence: {
+      open: async () => {
+        opens += 1
+        return {
+          header: {},
+          read: async () => ({ events: [{ seq: 1, time: 1, type: 'session/title', data: { title: 'from log' } }] }),
+          close: async () => {},
+        }
+      },
+    },
+    agents: { get: () => undefined, list: () => [] },
+    setInterval: () => 0,
+    clearInterval: () => {},
+    effect: () => {},
+  }
+  const registry = { all: async () => [], record() {}, touch() {}, load: async () => {}, persist: async () => {} }
+  registerBridgeTools({ ctx, registry, monitor: { dispose() {}, start() {}, stop: () => false, list: () => [] } })
+  const value = await registered.get('session_bridge_archived').execute({ resolveTitles: true, limit: 2 }, {})
+  assert.equal(opens, 2)
+  assert.deepEqual(value.items.map((i) => i.sessionId), ['c', 'd'])
+  assert.equal(value.items[0].title, 'from log')
+  assert.equal(value.total, 4)
+  assert.deepEqual(JSON.parse(JSON.stringify(value)), value)
 })
 
 console.log('')

@@ -1,3 +1,14 @@
+# 0.5.0
+
+- **去掉强版本绑定：peer 只声明下限。** 此前 `peerDependencies` 写的是 `^0.1.7-0`（等价于 `>=0.1.7-0 <0.2.0`），harness 一升到 `0.2.0-rc.1`，DSH 的插件兼容性闸门就把整个 bundle 判为 `incompatible-version` **静默跳过**——本插件在运行中的 web profile 里根本没挂载，`session_bridge_*` 全部不可用（实测 `dsh --profile web --dump-config` 报 `skipping profile bundle "dsh-session-bridge"`）。现在 8 个 peer 全部改为 `>=0.1.7-0`：只保留下限、不设上限，后续版本默认兼容，不再需要按版本逐个发版或申请 exact-version 豁免。`dsh.plugin.json` 的 `engines.dsh` 同步改为 `>=0.1.7-0`。
+- **构建与类型检查对齐运行中的 harness（0.2.0-rc.1）。** devDependencies 从锁定 `0.1.7-rc.1` 改为 `>=0.2.0-rc.1`（lockfile 仍固定到具体版本，CI 用 `--frozen-lockfile`），产物按 0.2.0-rc.1 重建。`pnpm typecheck`、`pnpm check:compat`、`pnpm test`、`pnpm smoke` 全绿——**0.2.0-rc.1 上没有任何 API 破坏，代码无需改动**，此前只是被版本闸门挡住。
+- **`check:compat` 的来源校验不再是"必须完全一致"。** 旧规则要求 `lib/index.js` 内联的 DSH 版本与已安装 harness 逐字相同，等于每次 harness 升级都红灯。新规则只把"内联版本**低于**声明下限（0.1.7-0）"判为失败，其余漂移给出提示（含 `pnpm build` 的建议）；传 `--strict` 或 `DSH_COMPAT_STRICT=1` 可恢复旧的严格判定。三个分支都用假 scope（伪造 0.3.0-rc.1）与伪造下限实测过。
+- **`pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude` 不再绑定版本。** 原先每个 `@deepseek-ai/dsh-*` 都钉着 `0.1.7-alpha.1 || 0.1.7-rc.1`，新版本会被 install 策略挡住；现在只列包名，DSH 发布当天即可安装。cordis / schemastery 与 DSH 不同步发版，仍保持钉版本。
+- **归档结果不再回显整个归档集合。** `session_bridge_archive` / `session_bridge_unarchive` 过去把集合里每个 id 都塞进工具结果——作者的 profile 已有 200+ 个归档会话，单次调用实测约 4k token，真正的结果被埋在 id 列表里。现在报告"受影响 id + 集合规模 + 最新 20 条（其余以 `+N earlier omitted` 概括）"；返回值的 `archivedSessionIds` 保持完整不变。
+- **`session_bridge_archived` 新增 `limit`（默认 50，最大 500，从最新往回取），`total` 始终是真实规模。** `resolveTitles: true` 也只解析返回的这段 id（此前会对几百个会话逐个读日志），列表被截断时渲染会先给出 `N archived; newest M:` 表头。
+- **回归测试 ×5 + 产物冒烟断言。** `scripts/test-tools-archived.mjs` 新增：archive 渲染只摘要不整列、unarchive 渲染同规则且被移除 id 不再出现、`limit` 取最新一段且 `total` 不变、非法 `limit` 在读注册表前即被拒、`resolveTitles` 只读取返回的 id；`scripts/smoke-bundle.mjs` 增加产物级断言（内联构件确实带 `limit`、渲染确实有界），因为 `src/` 测试抓不到"产物是旧版"的情况。
+- **运行中宿主实机复测 15 个工具全部通过（DSH 0.2.0-rc.1）。** create（含 `sinceSeq` 锚点）/ send（queue + steer 打断 25s 睡眠任务）/ resume（offline → live，跨工作区标题解析）/ wait（新回复、`waitFor: segment`、零新输出回落既有回复并标 `[stale]`）/ segments（turn 中途的 reasoning 段）/ read（live + 归档中的 offline 会话）/ find（live、offline、`liveOnly`、按 bridge 别名命中）/ status（running + `openTurn: yes` + 实时思维链、idle、`stalledMsThreshold`）/ cancel（清空 inbox）/ monitor_start + monitor_list + monitor_stop（含"目标空闲且无待处理即自动收尾"后 `monitor_stop` 返回 no active monitor）/ archive（活跃会话拒绝 + 提示、`stopActivity: true` 归档并停掉运行中工作、空闲直接归档）/ unarchive / archived。注意：运行中的宿主缓存已加载的模块，本次的渲染改动需重启（或热重载）后才生效——实机里旧构件仍返回完整列表。
+
 # 0.4.0
 
 - **修复产物与运行中 harness 不一致。** `lib/index.js` 此前内联 DSH `0.1.7-alpha.2`，而运行中的 harness 是 `0.1.7-rc.1`，`pnpm check:compat` 因此红灯（"the built lib/index.js inlines DSH ... but the installed harness is ..."）。锁定的 devDependencies 升到 `0.1.7-rc.1` 并重建宿主 bundle；现在 `check:compat` 全绿：`src/` 对 rc.1 类型检查通过，且产物内联版本与运行中 harness 一致。

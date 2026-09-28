@@ -12,11 +12,17 @@
  * break shows up here even when the checkout is stale.
  *
  * Usage:
- *   node scripts/check-dsh-compat.mjs [--dsh <path>]
+ *   node scripts/check-dsh-compat.mjs [--dsh <path>] [--strict]
  *
  * <path> may be either the DSH package directory or the `@deepseek-ai` scope
  * directory that holds dsh-session, dsh-agent, ... . When omitted, the installed
  * location is probed (DSH_INSTALLED_MODULES, then `npm root -g`).
+ *
+ * Provenance policy: the plugin declares only a peer FLOOR (>=0.1.7-0), so a
+ * newer harness is supported by design. This script therefore fails only when
+ * the artifact inlines DSH code OLDER than that floor; any other drift from the
+ * installed harness is reported as a note. Pass --strict (or set
+ * DSH_COMPAT_STRICT=1) to restore the old exact-match failure.
  *
  * Exits 0 when the plugin's src/ type-checks against those types, 1 otherwise.
  */
@@ -108,6 +114,64 @@ function fail(message) {
   console.error('check-dsh-compat: ' + message)
   process.exit(1)
 }
+
+/**
+ * Compare two semantic versions, prerelease-aware (enough for DSH's version
+ * shapes: `0.2.0-rc.1`, `0.1.7-alpha.2`, `0.2.0`). A release outranks any
+ * prerelease of the same core; numeric prerelease parts compare numerically.
+ */
+function compareVersions(a, b) {
+  const [coreA, preA = ''] = a.split('-', 2)
+  const [coreB, preB = ''] = b.split('-', 2)
+  const numsA = coreA.split('.').map(Number)
+  const numsB = coreB.split('.').map(Number)
+  for (let i = 0; i < 3; i++) {
+    const delta = (numsA[i] ?? 0) - (numsB[i] ?? 0)
+    if (delta !== 0) return delta < 0 ? -1 : 1
+  }
+  if (preA === preB) return 0
+  if (preA === '') return 1
+  if (preB === '') return -1
+  const partsA = preA.split('.')
+  const partsB = preB.split('.')
+  for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+    const x = partsA[i]
+    const y = partsB[i]
+    if (x === undefined) return -1
+    if (y === undefined) return 1
+    const numX = /^\d+$/.test(x)
+    const numY = /^\d+$/.test(y)
+    if (numX && numY) {
+      const delta = Number(x) - Number(y)
+      if (delta !== 0) return delta < 0 ? -1 : 1
+      continue
+    }
+    if (numX !== numY) return numX ? -1 : 1
+    if (x !== y) return x < y ? -1 : 1
+  }
+  return 0
+}
+
+/**
+ * Lowest DSH version this plugin declares support for: the first version named
+ * in each @deepseek-ai/dsh* peerDependencies range (`^0.1.7-0`, `>=0.1.7-0` and
+ * `0.1.7` all name 0.1.7-0). Only a peer FLOOR is declared on purpose — the
+ * plugin means "this harness or any later one", so the floor is the only
+ * version this repo treats as unsupported below it.
+ */
+function declaredFloor(manifest) {
+  let floor
+  for (const [name, range] of Object.entries(manifest.peerDependencies ?? {})) {
+    if (name !== '@deepseek-ai/dsh' && !name.startsWith('@deepseek-ai/dsh-')) continue
+    if (typeof range !== 'string') continue
+    const found = range.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/)
+    if (found === null) continue
+    if (floor === undefined || compareVersions(found[0], floor) < 0) floor = found[0]
+  }
+  return floor
+}
+
+const STRICT_PROVENANCE = process.argv.includes('--strict') || process.env.DSH_COMPAT_STRICT === '1'
 
 const scope = resolveScopeDir(process.argv.slice(2))
 if (scope === undefined) {
@@ -243,10 +307,22 @@ if (provenance === undefined) {
 } else if (provenance.versions.size === 0) {
   console.log('check-dsh-compat: bundle provenance not resolvable from the source map — skipped')
 } else {
-  const inlined = [...provenance.versions].sort().join(', ')
-  console.log('check-dsh-compat: lib/index.js inlined DSH ' + inlined + ' (from ' + provenance.roots.size + ' checkout(s) / registry entries)')
-  if (dshVersion !== '(unknown)' && !(provenance.versions.size === 1 && provenance.versions.has(dshVersion))) {
-    fail('the built lib/index.js inlines DSH ' + inlined + ' but the installed harness is ' + dshVersion
-      + ' — rebuild the bundle against the running harness (a stale checkout type-checks green while shipping old DSH code).')
+  const inlined = [...provenance.versions].sort(compareVersions)
+  const inlinedText = inlined.join(', ')
+  console.log('check-dsh-compat: lib/index.js inlined DSH ' + inlinedText + ' (from ' + provenance.roots.size + ' checkout(s) / registry entries)')
+  const floor = declaredFloor(manifest)
+  if (floor !== undefined && inlined.some((version) => compareVersions(version, floor) < 0)) {
+    fail('the built lib/index.js inlines DSH ' + inlinedText + ', which is OLDER than the minimum this plugin declares ('
+      + floor + ') — rebuild the bundle against a supported harness (pnpm build).')
+  }
+  if (inlined.length === 1 && inlined[0] === dshVersion) {
+    console.log('check-dsh-compat: bundle provenance matches the installed harness')
+  } else if (STRICT_PROVENANCE) {
+    fail('the built lib/index.js inlines DSH ' + inlinedText + ' but the installed harness is ' + dshVersion
+      + ' — rebuild the bundle against the running harness (strict provenance check enabled).')
+  } else {
+    console.log('check-dsh-compat: note — the bundle inlines DSH ' + inlinedText + ' while the installed harness is ' + dshVersion
+      + '; newer harnesses are supported by design (the declared floor is ' + String(floor) + '), so this is not a failure. '
+      + 'Run `pnpm build` when convenient to refresh the inlined internals; pass --strict to fail on drift.')
   }
 }

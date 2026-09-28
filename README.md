@@ -1,6 +1,8 @@
 # dsh-session-bridge — 会话桥 (Session bridge)
 
-Targets DSH **0.1.7-rc.1**. See [compatibility changes](CHANGELOG.md).
+Targets DSH **0.1.7-0 and later**: the peer range declares a floor only
+(`>=0.1.7-0`), never a ceiling; verified against **0.2.0-rc.1**. See
+[compatibility changes](CHANGELOG.md).
 
 A [DSH](https://www.deepseek.com) plugin that lets the current agent drive
 other real DSH sessions directly from a prompt — create sessions, send
@@ -69,7 +71,11 @@ action does.
   `session_bridge_unarchive` drops it from the archive set so it reappears at
   its recorded position. `session_bridge_archived` lists the archive
   set, optionally resolving titles; a session whose title cannot be resolved is
-  listed without one instead of failing the whole call.
+  listed without one instead of failing the whole call. The archive set grows
+  without bound, so archive/unarchive results report the affected id plus the
+  archive size and summarize the newest ids, and `session_bridge_archived`
+  windows the listing with an optional `limit` (default 50, newest first) while
+  `total` always reports the real size.
 
 ## Monitoring worker
 
@@ -130,7 +136,7 @@ time — not just its final reply — and act on it:
 
 - [Node.js](https://nodejs.org) ≥ 20
 - [pnpm](https://pnpm.io)
-- DSH `0.1.7-rc.1` (`^0.1.7-0`).
+- DSH `0.1.7-0` or later (`>=0.1.7-0`; built and tested against `0.2.0-rc.1`).
 
 ## Build
 
@@ -149,7 +155,11 @@ npm test
 dev_build_plugin dsh-session-bridge
 ```
 
-Builds use the locked 0.1.7-rc.1 registry packages; no source checkout is required. `check:compat` verifies the installed harness types and bundle provenance. CI uses the same lockfile.
+Builds use the locked `0.2.0-rc.1` registry packages; no source checkout is
+required. `check:compat` type-checks `src/` against the installed harness and
+then compares the artifact's inlined DSH version with it: inlining something
+older than the declared floor (`0.1.7-0`) fails, any other drift is a note
+(`--strict` restores the exact-match failure). CI uses the same lockfile.
 
 ## Deploy
 
@@ -269,9 +279,9 @@ registration and junction; not re-assembled on restart).
 | `session_bridge_monitor_start` | Start a background watchdog on a main session (poll, nudge, correct, cancel, wrap up); supports chain-of-thought `coRules` (e.g. reasoning not-contains "I'm" → cancel). |
 | `session_bridge_monitor_stop` | Stop a watchdog (keep the session itself running). |
 | `session_bridge_monitor_list` | List active watchdogs and their state. |
-| `session_bridge_archive` | Archive a session (hidden from groupings; history and position preserved); requires `stopActivity: true` for a running one. |
+| `session_bridge_archive` | Archive a session (hidden from groupings; history and position preserved); requires `stopActivity: true` for a running one. Reports the id, the archive size and the newest ids. |
 | `session_bridge_unarchive` | Unarchive a session (visible again at its recorded position; unknown ids are a no-op). |
-| `session_bridge_archived` | List the archive set, optionally resolving titles. |
+| `session_bridge_archived` | List the archive set (newest first, optional `limit`, default 50), optionally resolving titles for the returned ids. |
 
 All tools return lossless JSON; wait-style tools never throw on timeout — they
 return a `timedOut` / `aborted` / `stale` flag.

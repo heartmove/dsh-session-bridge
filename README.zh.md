@@ -1,6 +1,7 @@
 # dsh-session-bridge — 会话桥（Session bridge）
 
-当前适配 DSH **0.1.7-rc.1**，详见[兼容性变更](CHANGELOG.md)。
+适配 DSH **0.1.7-0 及之后的版本**：`peerDependencies` 只声明下限（`>=0.1.7-0`），
+不设上限，当前实测于 **0.2.0-rc.1**。详见[兼容性变更](CHANGELOG.md)。
 
 一个 [DSH](https://www.deepseek.com) 插件：让当前 agent 能通过提示词驱动其它真实的 DSH 会话——
 创建主会话、向任意会话发消息、等待并读取回复、恢复离线会话、跨工作区按名称或 id 查找会话。
@@ -44,7 +45,9 @@
   历史与位置保留）——目标仍在跑时默认拒绝归档，传 `stopActivity: true` 则先归档再按官方路径停掉它的
   运行中工作（turn、子 agent、job、schedule）；`session_bridge_unarchive` 把会话移出归档集合、回到原位
   置重新可见；`session_bridge_archived` 列出归档集合，可选解析标题——解析不出标题的会话
-  只省略标题，不会让整个调用失败。
+  只省略标题，不会让整个调用失败。归档集合会无限增长，因此 archive/unarchive 的结果只报
+  受影响 id + 集合规模并摘要最新若干条，`session_bridge_archived` 支持可选 `limit`
+  （默认 50、从最新往回取，`total` 始终是真实规模）。
 
 ## 监控守护循环
 
@@ -91,7 +94,7 @@
 
 - [Node.js](https://nodejs.org) ≥ 20
 - [pnpm](https://pnpm.io)
-- DSH `0.1.7-rc.1` (`^0.1.7-0`).
+- DSH `0.1.7-0` 或更高（`>=0.1.7-0`；构建与实测基于 `0.2.0-rc.1`）。
 
 ## 构建
 
@@ -114,7 +117,9 @@ dev_build_plugin dsh-session-bridge
 落后于插件实际加载进的 harness，因此 `build.sh` 通过**并不**代表插件在运行中的
 DSH 上可用——两者版本不一致时 `build.sh` 会给出警告。要验证运行版本请用
 `npm run check:compat`：它按已安装 DSH 包内随附的 `lib/types/*.d.ts`（即插件真正
-加载的 API 面）对 `src/` 做类型检查。
+加载的 API 面）对 `src/` 做类型检查，随后把产物内联的 DSH 版本与已安装 harness
+比对——内联版本**低于**声明下限（`0.1.7-0`）才判失败，其余漂移只给提示（传
+`--strict` 可恢复"必须完全一致"的严格判定），因为本插件声明的是"下限及之后"。
 
 ## 部署
 
@@ -222,9 +227,9 @@ dev_inject_plugin D:\code\dsh-session-bridge
 | `session_bridge_monitor_start` | 对一个主会话启动后台守护（轮询、催办、纠偏、终止、收尾）；支持思维链 `coRules`（如 reasoning not-contains "I'm" → cancel）。 |
 | `session_bridge_monitor_stop` | 停止守护（会话本身不终止）。 |
 | `session_bridge_monitor_list` | 列出活动守护及其状态。 |
-| `session_bridge_archive` | 归档会话（从分组隐藏；历史与位置保留）；对运行中的会话需显式 `stopActivity: true`。 |
+| `session_bridge_archive` | 归档会话（从分组隐藏；历史与位置保留）；对运行中的会话需显式 `stopActivity: true`。返回受影响 id、集合规模与最新若干条。 |
 | `session_bridge_unarchive` | 取消归档（回到原位置重新可见；未知/未归档 id 为幂等空操作）。 |
-| `session_bridge_archived` | 列出归档集合，可选解析标题。 |
+| `session_bridge_archived` | 列出归档集合（从最新往回，可选 `limit`，默认 50），可选为返回的 id 解析标题。 |
 
 所有工具输出 lossless JSON；等待类工具超时不抛错，返回 `timedOut` / `aborted` / `stale` 标记。
 

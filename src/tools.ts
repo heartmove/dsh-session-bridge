@@ -1098,15 +1098,27 @@ interface ArchiveArgs {
   stopActivity?: boolean
 }
 
+/** How many archived ids a tool result echoes before it summarizes the rest. */
+const ARCHIVE_ECHO_LIMIT = 20
+
+/**
+ * 紧凑渲染归档集合：归档集合会无限增长（真实宿主里已有 200+ 个），而每次
+ * archive/unarchive 都把整集合回显到工具结果里，会把真正的结果埋进数千 token
+ * 的 id 列表里（实测单次约 4k token）。这里只回显最新的一段，`total` 始终给出
+ * 准确规模；需要完整列表时用 `session_bridge_archived`（可传 limit）。
+ */
 function renderArchived(ids: readonly string[]): string {
-  if (ids.length === 0) return '(no archived sessions)'
-  return 'archived: ' + ids.join(', ')
+  const total = 'total archived: ' + String(ids.length)
+  if (ids.length === 0) return total + ' (empty)'
+  const shown = ids.slice(-ARCHIVE_ECHO_LIMIT)
+  const omitted = ids.length - shown.length
+  return total + '\nmost recent: ' + shown.join(', ') + (omitted > 0 ? ' … (+' + String(omitted) + ' earlier omitted)' : '')
 }
 
 function registerArchive(env: BridgeEnv): void {
   env.ctx.tools.register(defineTool({
     name: 'session_bridge_archive',
-    description: 'Archive one session: add it to the workspace registry\'s global archive set so it is hidden from every grouping surface in the UI (Un/grouped, workspaces) while its session history and workspace position are preserved. Mirrors the workspace controller archiveSession. The session must exist (live or in session persistence) and, without stopActivity, must be inactive — otherwise the archive is refused with "the session is active". Returns the complete resulting archive set.',
+    description: 'Archive one session: add it to the workspace registry\'s global archive set so it is hidden from every grouping surface in the UI (Un/grouped, workspaces) while its session history and workspace position are preserved. Mirrors the workspace controller archiveSession. The session must exist (live or in session persistence) and, without stopActivity, must be inactive — otherwise the archive is refused with "the session is active". Returns the affected session id and the resulting archive size (the newest ids only; use session_bridge_archived for a listing).',
     parameters: {
       sessionId: { type: 'string', required: true, description: 'Session id to archive.' },
       stopActivity: { type: 'boolean', description: 'When true, stop the session\'s running work (turn, subagents, jobs, schedules) instead of refusing the archive because work is active (default false). The archive is written first and the stops are requested afterwards, exactly like the UI archive action.' },
@@ -1140,7 +1152,7 @@ function registerArchive(env: BridgeEnv): void {
 
   env.ctx.tools.register(defineTool({
     name: 'session_bridge_unarchive',
-    description: 'Unarchive one session: drop it from the workspace registry\'s global archive set so it is visible again on every grouping surface at its recorded position (its workspace accounting is never touched by archiving, so the slot is still there). Mirrors the workspace controller unarchiveSession. An unknown or not-archived id is an idempotent no-op. Returns the complete resulting archive set.',
+    description: 'Unarchive one session: drop it from the workspace registry\'s global archive set so it is visible again on every grouping surface at its recorded position (its workspace accounting is never touched by archiving, so the slot is still there). Mirrors the workspace controller unarchiveSession. An unknown or not-archived id is an idempotent no-op. Returns the affected session id and the resulting archive size (the newest ids only; use session_bridge_archived for a listing).',
     parameters: {
       sessionId: { type: 'string', required: true, description: 'Session id to unarchive.' },
     },
@@ -1166,9 +1178,10 @@ function registerArchive(env: BridgeEnv): void {
 
   env.ctx.tools.register(defineTool({
     name: 'session_bridge_archived',
-    description: 'List the session ids currently in the workspace registry archive set (hidden from groupings). Optionally resolve titles from the session log. Read-only.',
+    description: 'List the session ids currently in the workspace registry archive set (hidden from groupings). Optionally resolve titles from the session log. The newest `limit` ids are returned (default 50, max 500) because the archive set grows without bound; `total` always reports the real size. Read-only.',
     parameters: {
-      resolveTitles: { type: 'boolean', description: 'When true, resolve each archived session\'s title from its log (default false).' },
+      resolveTitles: { type: 'boolean', description: 'When true, resolve each archived session\'s title from its log (default false). Titles are resolved only for the returned ids.' },
+      limit: { type: 'number', description: 'Maximum ids to return, taken from the newest end of the archive set (default 50, max 500).' },
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
@@ -1176,17 +1189,24 @@ function registerArchive(env: BridgeEnv): void {
         const v = value as Record<string, unknown>
         const items = (v.items as Array<{ sessionId: string; title?: string }> | null) ?? []
         if (items.length === 0) return [{ type: 'text' as const, text: '(no archived sessions)' }]
-        return [{ type: 'text' as const, text: items.map((i) => i.sessionId + (i.title === undefined ? '' : ' ("' + i.title + '")')).join('\n') }]
+        const total = typeof v.total === 'number' ? v.total : items.length
+        const lines = items.map((i) => i.sessionId + (i.title === undefined ? '' : ' ("' + i.title + '")'))
+        if (items.length < total) lines.unshift(String(total) + ' archived; newest ' + String(items.length) + ':')
+        return [{ type: 'text' as const, text: lines.join('\n') }]
       },
     },
-    async execute(args: { resolveTitles?: boolean }) {
-      const archived = env.ctx.workspaceRegistry.archivedSessionIds.map(String)
+    async execute(args: { resolveTitles?: boolean; limit?: number }) {
+      const limit = clampLimit(args.limit, 50, 500)
+      const all = env.ctx.workspaceRegistry.archivedSessionIds.map(String)
+      // 最新在尾部：截尾返回最新的一段，与 archive/unarchive 的回显方向一致。
+      const archived = all.slice(-limit)
       if (args.resolveTitles !== true || archived.length === 0) {
-        return asJson({ items: archivedEntries(archived, new Map()), total: archived.length })
+        return asJson({ items: archivedEntries(archived, new Map()), returned: archived.length, total: all.length })
       }
       // 标题来源优先级：bridge 登记表里的别名 > 会话日志里的标题/首条用户消息。
       // 解析不出来的会话就**不带** title 字段返回（绝不写 undefined —— 那会让整个
       // 工具返回值不再是 lossless JSON，宿主会拒绝它，标题缺失不该升级成整体失败）。
+      // 只解析返回的这段 id：集合可能有几百个，逐个读日志会拖垮工具调用。
       const titles = new Map<string, string | undefined>()
       try {
         const records = await env.registry.all()
@@ -1199,7 +1219,7 @@ function registerArchive(env: BridgeEnv): void {
           titles.set(sessionId, titleOf(inspection.events))
         } catch { /* offline title unavailable */ }
       }
-      return asJson({ items: archivedEntries(archived, titles), total: archived.length })
+      return asJson({ items: archivedEntries(archived, titles), returned: archived.length, total: all.length })
     },
   }))
 }
