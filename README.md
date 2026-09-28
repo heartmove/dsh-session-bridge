@@ -159,7 +159,9 @@ Builds use the locked `0.2.0-rc.1` registry packages; no source checkout is
 required. `check:compat` type-checks `src/` against the installed harness and
 then compares the artifact's inlined DSH version with it: inlining something
 older than the declared floor (`0.1.7-0`) fails, any other drift is a note
-(`--strict` restores the exact-match failure). CI uses the same lockfile.
+(`--strict` restores the exact-match failure). The inlined `cordis` copy is
+tracked separately and compared with the installed `cordis`. CI uses the same
+lockfile.
 
 ## Deploy
 

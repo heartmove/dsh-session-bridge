@@ -206,7 +206,12 @@ function dshVersionOf(scopeDir) {
  * 0.1.6-alpha.2). This reads the map's sources — a checkout path names the root
  * whose package.json carries the version; a .pnpm path encodes it.
  *
- * @returns { versions: Set<string>, roots: Set<string> } or undefined when no map exists.
+ * `@deepseek-ai/cordis` is tracked SEPARATELY from the dsh release train: it is
+ * versioned independently, so its version is compared with the installed cordis
+ * rather than with the harness version. (Observed drift: the bundle inlined
+ * cordis 4.0.3 while the harness ran 4.0.4.)
+ *
+ * @returns { versions: Set<string>, cordis: Set<string>, roots: Set<string> } or undefined when no map exists.
  */
 function artifactProvenance() {
   const mapPath = join(ROOT, 'lib', 'index.js.map')
@@ -214,16 +219,17 @@ function artifactProvenance() {
   let map
   try { map = JSON.parse(readFileSync(mapPath, 'utf8')) } catch { return undefined }
   const versions = new Set()
+  const cordis = new Set()
   const roots = new Set()
   for (const source of Array.isArray(map.sources) ? map.sources : []) {
     if (typeof source !== 'string') continue
     // pnpm shortens long virtual-store directory names on Windows. Read the
     // package manifest instead of treating a truncated `@0.1._hash` as a version.
-    const packageRoot = source.match(/^(.*[/\\]node_modules[/\\]@deepseek-ai[/\\]dsh-[^/\\]+)[/\\]/)
+    const packageRoot = source.match(/^(.*[/\\]node_modules[/\\]@deepseek-ai[/\\](dsh-[^/\\]+|cordis))[/\\]/)
     if (packageRoot !== null) {
       const manifest = readJson(resolve(ROOT, 'lib', packageRoot[1], 'package.json'))
       if (typeof manifest?.version === 'string') {
-        versions.add(manifest.version)
+        ;(packageRoot[2] === 'cordis' ? cordis : versions).add(manifest.version)
         continue
       }
     }
@@ -231,20 +237,18 @@ function artifactProvenance() {
     const checkout = source.match(/^(.*?)[/\\](?:packages|vendor)[/\\]/)
     if (checkout !== null) { roots.add(resolve(ROOT, 'lib', checkout[1])); continue }
     // Registry install: .../.pnpm/@deepseek-ai+dsh-<name>@<version>[_hash]/node_modules/...
-    // Only dsh-* packages name the harness release; sibling @deepseek-ai
-    // packages (cordis, schemastery) are versioned independently, so counting
-    // them would make every CI build look like a provenance mismatch.
-    const registry = source.match(/[\\/]\.pnpm[\\/]@deepseek-ai\+dsh-[a-z0-9-]+@([^\\/]+)[\\/]node_modules/)
+    // Only dsh-* packages name the harness release; cordis is collected separately.
+    const registry = source.match(/[\\/]\.pnpm[\\/]@deepseek-ai\+(dsh-[a-z0-9-]+|cordis)@([^\\/]+)[\\/]node_modules/)
     if (registry !== null) {
-      const version = registry[1].replace(/_.*$/, '')
-      if (/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(version)) versions.add(version)
+      const version = registry[2].replace(/_.*$/, '')
+      if (/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(version)) (registry[1] === 'cordis' ? cordis : versions).add(version)
     }
   }
   for (const root of roots) {
     const manifest = readJson(join(root, 'package.json'))
     if (typeof manifest?.version === 'string') versions.add(manifest.version)
   }
-  return { versions, roots }
+  return { versions, cordis, roots }
 }
 
 const dshVersion = dshVersionOf(scope) ?? '(unknown)'
@@ -324,5 +328,25 @@ if (provenance === undefined) {
     console.log('check-dsh-compat: note — the bundle inlines DSH ' + inlinedText + ' while the installed harness is ' + dshVersion
       + '; newer harnesses are supported by design (the declared floor is ' + String(floor) + '), so this is not a failure. '
       + 'Run `pnpm build` when convenient to refresh the inlined internals; pass --strict to fail on drift.')
+  }
+}
+
+// cordis rides its own release train, so its inlined copy is compared with the
+// installed cordis (not with the harness version). A mismatch is the same class
+// of risk as DSH drift: the artifact ships its own copy either way.
+if (provenance !== undefined && provenance.cordis.size > 0) {
+  const inlinedCordis = [...provenance.cordis].sort(compareVersions)
+  const inlinedCordisText = inlinedCordis.join(', ')
+  const installedCordis = readJson(join(scope, 'cordis', 'package.json'))?.version
+  if (typeof installedCordis !== 'string') {
+    console.log('check-dsh-compat: lib/index.js inlined cordis ' + inlinedCordisText + ' (installed cordis not found in this scope — not compared)')
+  } else if (inlinedCordis.length === 1 && inlinedCordis[0] === installedCordis) {
+    console.log('check-dsh-compat: bundle inlined cordis ' + inlinedCordisText + ' matches the installed cordis')
+  } else if (STRICT_PROVENANCE) {
+    fail('the built lib/index.js inlines @deepseek-ai/cordis ' + inlinedCordisText + ' but the installed cordis is '
+      + installedCordis + ' — rebuild the bundle against the running harness (strict provenance check enabled).')
+  } else {
+    console.log('check-dsh-compat: note — the bundle inlines @deepseek-ai/cordis ' + inlinedCordisText + ' while the installed cordis is '
+      + installedCordis + '; run `pnpm build` (with the dev dependency aligned) to refresh it, or pass --strict to fail on drift.')
   }
 }

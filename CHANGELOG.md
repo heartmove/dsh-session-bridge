@@ -1,3 +1,9 @@
+# 0.5.1
+
+- **产物内联的 cordis 对齐到运行中的 harness。** bundle 会把 `@deepseek-ai/cordis` 一起内联（`alwaysBundle` 把所有非 `node:` 依赖都打进去），而 devDependency 一直钉在 `4.0.3`：DSH `0.2.0-rc.1` 的包声明 `cordis ~4.0.4`，运行中的 harness 装的是 `4.0.4`，于是产物里跑的是另一份 cordis。devDependency 改为 `npm:@deepseek-ai/cordis@^4.0.4`（范围而非钉死），重建后产物内联 `4.0.4`，与已安装版本一致；`pnpm peers check` 不再报 `unmet peer @deepseek-ai/cordis`。功能无改动，15 个工具行为不变。
+- **`check:compat` 现在单独跟踪 cordis 漂移。** 此前来源校验只统计 `dsh-*` 版本（cordis 与 DSH 发版节奏不同，混在一起会永远报错），结果是"产物内联 cordis 4.0.3 / 宿主 4.0.4"这类漂移完全看不见。现在 cordis 单独成组，与**已安装的 cordis** 比对：一致则确认，不一致按同一策略给提示（`--strict` 下判失败）。用伪造 scope（harness 0.3.0-rc.1 + cordis 4.0.5）实测过三个分支。
+- **`pnpm-workspace.yaml`** 里 cordis 的 `minimumReleaseAgeExclude` 同样去掉版本（与上一版对 DSH 包的处理一致）。
+
 # 0.5.0
 
 - **去掉强版本绑定：peer 只声明下限。** 此前 `peerDependencies` 写的是 `^0.1.7-0`（等价于 `>=0.1.7-0 <0.2.0`），harness 一升到 `0.2.0-rc.1`，DSH 的插件兼容性闸门就把整个 bundle 判为 `incompatible-version` **静默跳过**——本插件在运行中的 web profile 里根本没挂载，`session_bridge_*` 全部不可用（实测 `dsh --profile web --dump-config` 报 `skipping profile bundle "dsh-session-bridge"`）。现在 8 个 peer 全部改为 `>=0.1.7-0`：只保留下限、不设上限，后续版本默认兼容，不再需要按版本逐个发版或申请 exact-version 豁免。`dsh.plugin.json` 的 `engines.dsh` 同步改为 `>=0.1.7-0`。
