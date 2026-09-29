@@ -1,8 +1,9 @@
 # dsh-session-bridge — 会话桥 (Session bridge)
 
 Targets DSH **0.1.7-0 and later**: the peer range declares a floor only
-(`>=0.1.7-0`), never a ceiling; verified against **0.2.0-rc.1**. See
-[compatibility changes](CHANGELOG.md).
+(`>=0.1.7-0`), never a ceiling; verified against **0.2.0-rc.2**. See
+[compatibility changes](CHANGELOG.md) and [AGENTS.md](./AGENTS.md) (the version
+policy is a hard rule, guarded by `pnpm test`).
 
 A [DSH](https://www.deepseek.com) plugin that lets the current agent drive
 other real DSH sessions directly from a prompt — create sessions, send
@@ -136,7 +137,7 @@ time — not just its final reply — and act on it:
 
 - [Node.js](https://nodejs.org) ≥ 20
 - [pnpm](https://pnpm.io)
-- DSH `0.1.7-0` or later (`>=0.1.7-0`; built and tested against `0.2.0-rc.1`).
+- DSH `0.1.7-0` or later (`>=0.1.7-0`; built and tested against `0.2.0-rc.2`).
 
 ## Build
 
@@ -148,14 +149,14 @@ pnpm build
 # type-check src/ against the dsh that is actually installed (no checkout needed)
 npm run check:compat
 
-# regression tests: wait/stall core, the archived tool handler, V3→V4 migration
+# regression tests: peer floor, wait/stall core, the archived tool handler, V3→V4 migration
 npm test
 
 # via the injector toolchain
 dev_build_plugin dsh-session-bridge
 ```
 
-Builds use the locked `0.2.0-rc.1` registry packages; no source checkout is
+Builds use the locked `0.2.0-rc.2` registry packages; no source checkout is
 required. `check:compat` type-checks `src/` against the installed harness and
 then compares the artifact's inlined DSH version with it: inlining something
 older than the declared floor (`0.1.7-0`) fails, any other drift is a note
@@ -192,6 +193,27 @@ npx -p @deepseek-ai/dsh dsh plugin --profile web add dsh-session-bridge@alpha
 
 pnpm installs the published tarball and runs its `prepare` script (`tsdown`) to
 ensure `lib/` is present, then `dsh` activates the bundle.
+
+> **For ~24 hours after a release, `@latest` resolves to the previous version.**
+> pnpm 11 enables supply-chain protection by default
+> ([`minimumReleaseAge` defaults to 1440 minutes](https://pnpm.io/blog/releases/11.0)):
+> versions published less than 24h ago are excluded from resolution, and because
+> `minimumReleaseAgeStrict` defaults to `false`, pnpm **silently falls back** to
+> the newest old-enough version instead of erroring. `pnpm view dsh-session-bridge
+> dist-tags` still reports the new `latest`, but the install picks the old one —
+> whose peer range a newer DSH may already reject, which reads as "I asked for
+> `latest` and it still says incompatible". Three ways out:
+>
+> 1. Exclude the package in the consuming profile's `pnpm-workspace.yaml` so
+>    `@latest` takes effect immediately:
+>    ```yaml
+>    minimumReleaseAgeExclude:
+>      - dsh-session-bridge
+>    ```
+> 2. Install a local tarball (no registry resolution):
+>    `dsh plugin --profile <p> add <path>/dsh-session-bridge-x.y.z.tgz`;
+> 3. Wait 24 hours. Pinning an exact version does *not* bypass the policy
+>    (it fails hard with `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`).
 
 ### Install from GitHub
 

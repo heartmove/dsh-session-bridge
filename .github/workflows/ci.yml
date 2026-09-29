@@ -32,7 +32,7 @@ jobs:
           cache: pnpm
 
       # The lockfile pins the DSH packages this build is verified against
-      # (currently 0.2.0-rc.1); the plugin's peer range is a floor only.
+      # (currently 0.2.0-rc.2); the plugin's peer range is a floor only.
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 

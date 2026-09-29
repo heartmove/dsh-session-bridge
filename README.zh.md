@@ -1,7 +1,8 @@
 # dsh-session-bridge — 会话桥（Session bridge）
 
 适配 DSH **0.1.7-0 及之后的版本**：`peerDependencies` 只声明下限（`>=0.1.7-0`），
-不设上限，当前实测于 **0.2.0-rc.1**。详见[兼容性变更](CHANGELOG.md)。
+不设上限，当前实测于 **0.2.0-rc.2**。详见[兼容性变更](CHANGELOG.md)与
+[AGENTS.md](./AGENTS.md)（版本策略是硬性规则，有 `pnpm test` 守卫）。
 
 一个 [DSH](https://www.deepseek.com) 插件：让当前 agent 能通过提示词驱动其它真实的 DSH 会话——
 创建主会话、向任意会话发消息、等待并读取回复、恢复离线会话、跨工作区按名称或 id 查找会话。
@@ -94,7 +95,7 @@
 
 - [Node.js](https://nodejs.org) ≥ 20
 - [pnpm](https://pnpm.io)
-- DSH `0.1.7-0` 或更高（`>=0.1.7-0`；构建与实测基于 `0.2.0-rc.1`）。
+- DSH `0.1.7-0` 或更高（`>=0.1.7-0`；构建与实测基于 `0.2.0-rc.2`）。
 
 ## 构建
 
@@ -106,7 +107,7 @@ pnpm build
 # 针对"实际安装的 dsh"做类型检查（不需要 checkout）
 npm run check:compat
 
-# 核心 wait/卡住判定、archived 工具 handler、V3→V4 迁移的回归测试（Node 类型擦除直跑 src/）
+# peer 下限守卫、核心 wait/卡住判定、archived 工具 handler、V3→V4 迁移的回归测试
 npm test
 
 # 或经注入器工具链
@@ -147,6 +148,21 @@ npx -p @deepseek-ai/dsh dsh plugin --profile web add dsh-session-bridge@alpha
 
 pnpm 会安装发布的 tarball 并运行其 `prepare` 脚本（`tsdown`）以确保 `lib/` 就绪，
 随后 `dsh` 激活该 bundle。
+
+> **新版本发布后约 24 小时内，`@latest` 会解析到旧版本。** pnpm 11 默认开启供应链保护
+> （[`minimumReleaseAge` 默认 1440 分钟](https://pnpm.io/zh/blog/releases/11.0)），发布不满
+> 24h 的版本不参与解析；`minimumReleaseAgeStrict` 默认为 `false`，所以 **pnpm 会静默回退**到
+> 最新一个"够老"的版本，不报错也不提示。此时 `pnpm view dsh-session-bridge dist-tags` 仍显示
+> `latest` 是新版，但实际装到的是旧版——而旧版的 peer 范围可能已被新的 DSH 拒绝，于是出现
+> "指定了 latest 却说版本不兼容"。三种解法：
+>
+> 1. 在使用方 profile 的 `pnpm-workspace.yaml` 里排除本包，`@latest` 立刻生效：
+>    ```yaml
+>    minimumReleaseAgeExclude:
+>      - dsh-session-bridge
+>    ```
+> 2. 装本地 tarball（不经 registry 解析）：`dsh plugin --profile <p> add <路径>/dsh-session-bridge-x.y.z.tgz`；
+> 3. 等满 24 小时。指定精确版本不能绕过该策略（会硬报 `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`）。
 
 ### 从 GitHub 安装
 
