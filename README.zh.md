@@ -2,7 +2,7 @@
 
 适配 DSH **0.1.7-0 及之后的版本**：`peerDependencies` 与 `package.json` 的 `engines.dsh` 都只声明
 下限（`>=0.1.7-0`），不设上限。**DSH `0.2.1-rc.1` 起 `engines.dsh` 单独裁决**（声明了就忽略
-`peerDependencies`），所以两者逐字一致，当前实测于 **0.2.1-rc.1**。详见[兼容性变更](CHANGELOG.md)与
+`peerDependencies`），所以两者逐字一致，当前实测于 **0.2.2-alpha.3**。详见[兼容性变更](CHANGELOG.md)与
 [AGENTS.md](./AGENTS.md)（版本策略是硬性规则，有 `pnpm test` 守卫）。
 
 一个 [DSH](https://www.deepseek.com) 插件：让当前 agent 能通过提示词驱动其它真实的 DSH 会话——
@@ -191,7 +191,7 @@
 - [Node.js](https://nodejs.org) ≥ 20
 - [pnpm](https://pnpm.io)
 - DSH `0.1.7-0` 或更高（`peerDependencies` 与 `engines.dsh` 都是 `>=0.1.7-0`；构建与实测基于
-  `0.2.1-rc.1`）。
+  `0.2.2-alpha.3`）。
 
 ## 构建
 

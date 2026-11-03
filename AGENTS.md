@@ -59,7 +59,7 @@ peerDependencies {"@deepseek-ai/dsh-session":"^0.1.7-0", ...}.
 **回滚**（`package.json` / `pnpm-lock.yaml` / `node_modules` 全部还原），已装好的 bundle 在启动时被
 **静默跳过**，`session_bridge_*` 全部消失。**0.5.0 起已改为下限，别再改回去。**
 
-实测矩阵（本仓库 0.7.0 的 manifest，用两版 harness 各自的 `evaluatePluginCompatibility` 求值）：
+实测矩阵（本仓库 0.8.0 的 manifest，用两版 harness 各自的 `evaluatePluginCompatibility` 求值）：
 
 | manifest 形态 | `0.2.0-rc.2`（旧闸门） | `0.2.1-rc.1`（新闸门） |
 |---|---|---|
@@ -195,9 +195,28 @@ cd "$env:TEMP\ci-check"; pnpm install --frozen-lockfile; pnpm build
 
 然后更新 `README.zh.md` / `README.md` 的「实测于 x.y.z」与 `CHANGELOG.md`，必要时发新版本。
 
+### 上游破坏了函数签名时：先特性检测，再考虑抬下限（0.2.2-alpha.3 实例）
+
+`0.2.2-alpha.3` 把 `@deepseek-ai/dsh-agent` 的 `installModelSelection(agentCtx, selection)` 改成
+`installModelSelection(agentCtx)`（选择权迁到 `AgentModel` + 持久化的 `modelSelection` 投影，函数只剩
+"装模型切换提示监听"）。这类**只改形参**的破坏最危险：多传的那个实参会被 JS 静默忽略，旧代码照常不报错，
+只是语义悄悄消失。处理顺序固定为：
+
+1. **先做运行时特性探测**（本例按形参个数：`install.length >= 2` 走老签名，否则走新签名；安装器缺失或抛错
+   就退回落 `agent/request` 兜底钩子）。能同时支持新旧宿主，就**不抬下限**——下限覆盖越宽越好。
+2. 探测做不到（老 API 不可调用、协议/事件形状变了）才抬下限，并按 §1「破坏性变更时」把 8 个 peer、
+   `engines.dsh`（两份 manifest）、12 个 dev 范围一起抬，同时在 CHANGELOG 写明放弃哪些旧版本。
+3. **无论哪种，都要给探测本身补回归**（`scripts/test-tools-create.mjs` 的 5 例）：两种 arity 各测一次、
+   安装器抛错/缺失的回落路径各测一次，再加一条"已安装包的 arity 必须是 1 或 2"——上游再改签名时这条先红。
+
+顺带记住这一版的两处**无关但容易误判**的改动：`SessionStore` 的会话在 `session/created` 公告完成前**只读**
+（桥只走 `agents.create()` / `agent.followup()`，从不直接 `session.append`，所以不受影响）；新 cordis 的配置
+校验改走 standard-schema（`runtime.Config["~standard"].validate`），本插件的 `Config` 带 `~standard`，校验后
+volatile 字段仍是稳定引用——换 cordis/schemastery 版本后，`pnpm smoke` 与这段探测就是用来证明这点的。
+
 ### 验证运行中的 harness（两处安装，都要验）
 
-**① 会话里正在跑的 harness**（全局 npm / scoop 安装，本例 `0.2.1-rc.1`）——`pnpm check:compat`
+**① 会话里正在跑的 harness**（全局 npm / scoop 安装，本例 `0.2.2-alpha.3`）——`pnpm check:compat`
 的目录锚点扫的就是它（`<dsh 安装目录>\node_modules\@deepseek-ai`），所以这一侧已被 `check:compat`
 覆盖；要单独求值就直接 import 它的 `dsh-app-boot`：
 
@@ -218,7 +237,7 @@ console.log(boot.getDshRuntimeVersion(), boot.evaluatePluginCompatibility(manife
 取版本别用它，直接读 `resources\app\dsh\package.json` 的 `version`。把上面的 `gate.mjs` 指向桌面版
 那份 `dsh-app-boot` 即可。
 
-实测（0.7.0 的 manifest）：scoop `0.2.1-rc.1` ✅、桌面版 `0.2.0-rc.2` ✅。
+实测（0.8.0 的 manifest）：scoop `0.2.2-alpha.3` ✅、桌面版 `0.2.0-rc.2` ✅。
 
 安装日志在 `<DSH_HOME>\profiles\<profile>\.plugin-manager\logs\operation-*\pnpm.log`，被拒时会写
 `installation rejected: ... incompatible with dsh ...`——排查"装了但没生效"先看这里。

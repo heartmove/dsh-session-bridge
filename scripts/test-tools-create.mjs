@@ -13,6 +13,7 @@
  */
 import assert from 'node:assert/strict'
 import { registerBridgeTools } from '../src/tools.ts'
+import { installModelSelectionCompat } from '../src/session-create.ts'
 
 let passed = 0
 let failed = 0
@@ -234,6 +235,60 @@ await test('create: waitForReply without a prompt neither waits nor returns an a
   const created = await h.run({ cwd: 'D:/target', waitForReply: true, timeoutMs: 1 })
   assert.equal(created.reply, undefined)
   assert.equal(created.sinceSeq, undefined)
+})
+
+// --- host-signature compat: installModelSelection (0.2.2-alpha.3 breaking change) ---
+// Upstream changed `installModelSelection(agentCtx, selection)` (<= 0.2.1-rc.x) into
+// `installModelSelection(agentCtx)` (>= 0.2.2-alpha.3): the selection moved to
+// AgentModel + the durable `modelSelection` projection, and the installer now only
+// attaches the model-switch notice listener. Passing the old second argument is
+// silently ignored, so the plugin MUST branch on arity instead of trusting that the
+// extra argument still does something — otherwise a caller-inherited route quietly
+// stops being applied on the old hosts (and the intent disappears on the new ones).
+await test('compat: the two-argument installer receives the caller selection', async () => {
+  const calls = []
+  const selection = { current: { provider: 'p1', model: 'm1', reasoningEffort: 'high' } }
+  const install = function (agentCtx, sel) { calls.push([agentCtx, sel]) }
+  const ctx = { id: 'agent-ctx' }
+  assert.equal(installModelSelectionCompat(install, ctx, selection), true)
+  assert.deepEqual(calls, [[ctx, selection]])
+})
+
+await test('compat: the one-argument installer is called without the selection', async () => {
+  const calls = []
+  const selection = { current: { provider: 'p1', model: 'm1' } }
+  // Arity 1 is exactly the 0.2.2-alpha.3 shape.
+  const install = function (agentCtx) { calls.push(agentCtx) }
+  const ctx = { id: 'agent-ctx' }
+  assert.equal(installModelSelectionCompat(install, ctx, selection), true)
+  assert.deepEqual(calls, [ctx])
+  assert.equal(install.length, 1, 'the control case must really be arity 1')
+})
+
+await test('compat: a throwing installer reports false so the caller can fall back', async () => {
+  const original = console.warn
+  const warned = []
+  console.warn = (...args) => { warned.push(args.join(' ')) }
+  try {
+    const install = function (agentCtx) { throw new Error('no such service') }
+    assert.equal(installModelSelectionCompat(install, {}, { current: undefined }), false)
+    assert.match(warned.at(-1) ?? '', /installModelSelection failed/)
+  } finally {
+    console.warn = original
+  }
+})
+
+await test('compat: an absent installer reports false', async () => {
+  assert.equal(installModelSelectionCompat(undefined, {}, { current: undefined }), false)
+})
+
+// Characterizes the host the plugin is BUILT against: if upstream ever restores a
+// two-argument installer, this assertion is the reminder to re-read both paths.
+await test('compat: the installed dsh-agent installer signature is understood', async () => {
+  const agentApi = await import('@deepseek-ai/dsh-agent')
+  const install = agentApi.installModelSelection
+  assert.equal(typeof install, 'function', 'dsh-agent must export installModelSelection')
+  assert.ok([1, 2].includes(install.length), 'installer arity must be 1 (>=0.2.2-alpha.3) or 2 (<=0.2.1-rc.x), got ' + String(install.length))
 })
 
 console.log('')

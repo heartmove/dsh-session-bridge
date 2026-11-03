@@ -677,11 +677,16 @@ export function statusSnapshot(ctx: Context, agent: LiveAgentLike): BridgeStatus
   const reasoningTail = reasoningTailOf(liveReasoning, lastReasoning)
   const inbox = agent.inbox
   const cwd = agent.session.header.cwd
+  const title = titleOf(events)
   return {
     sessionId: agent.id,
     live: true,
     running: agent.status,
-    title: titleOf(events),
+    // 显式写入 `title: undefined` 会让工具返回值不再是 lossless JSON，宿主会因此拒绝
+    // **整个** status 结果（与 archivedEntries 同一条真实故障：标题尚未产生的会话 ——
+    // 例如桥刚 create、还没写 title 事件的会话 —— 一查状态就整条失败）。标题缺失只是
+    // 信息缺失，不应让工具整体失败。
+    ...(title === undefined ? {} : { title }),
     ...(cwd === undefined ? {} : { cwd }),
     ...(workspaceByPath(ctx, cwd) === undefined ? {} : { workspaceId: workspaceByPath(ctx, cwd) }),
     openTurn,

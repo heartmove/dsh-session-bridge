@@ -3,7 +3,7 @@
 Targets DSH **0.1.7-0 and later**: both the peer ranges and `package.json`'s
 `engines.dsh` declare a floor only (`>=0.1.7-0`), never a ceiling. Since DSH
 **0.2.1-rc.1** `engines.dsh` decides alone (when present, `peerDependencies` are
-ignored), so the two state the same floor; verified against **0.2.1-rc.1**. See
+ignored), so the two state the same floor; verified against **0.2.2-alpha.3**. See
 [compatibility changes](CHANGELOG.md) and [AGENTS.md](./AGENTS.md) (the version
 policy is a hard rule, guarded by `pnpm test`).
 
@@ -249,7 +249,7 @@ A single watchdog can still opt out on its own:
 - [Node.js](https://nodejs.org) ≥ 20
 - [pnpm](https://pnpm.io)
 - DSH `0.1.7-0` or later (`peerDependencies` and `engines.dsh` both `>=0.1.7-0`;
-  built and tested against `0.2.1-rc.1`).
+  built and tested against `0.2.2-alpha.3`).
 
 ## Build
 
@@ -268,7 +268,7 @@ npm test
 dev_build_plugin dsh-session-bridge
 ```
 
-Builds use the locked `0.2.1-rc.1` registry packages; no source checkout is
+Builds use the locked `0.2.2-alpha.3` registry packages; no source checkout is
 required. `check:compat` type-checks `src/` against the installed harness and
 then compares the artifact's inlined DSH version with it: inlining something
 older than the declared floor (`0.1.7-0`) fails, any other drift is a note

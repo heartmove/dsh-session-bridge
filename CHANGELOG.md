@@ -1,3 +1,40 @@
+# 0.8.0
+
+- **适配 DSH `0.2.2-alpha.3`，并修掉它引入的一个真破坏：`installModelSelection` 少了一个参数。** 上游把
+  `installModelSelection(agentCtx, selection)` 改成 `installModelSelection(agentCtx)`——模型选择权从"调用方持有的可变引用"
+  迁到了 `AgentModel` + 持久化的 `modelSelection` session 投影，函数本体只剩"装模型切换提示监听"这一件事。
+  插件此前无条件传第二参数：在新宿主上不会报错，但**第二参数被静默忽略**，于是"继承调用方模型路由"这条语义从代码里消失，
+  只剩 `agentOptions` 这条兜底在硬撑——一旦上游哪天不再把 `agentOptions` 当路由兜底，就会变成静默降级。
+  现在 `src/session-create.ts` 里新增 `installModelSelectionCompat()`，按**形参个数**做特性探测：
+  `length >= 2` 走老签名（传 `selection` 引用），否则走新签名（只传 `agentCtx`，选择由 `agentOptions` + 投影持有）；
+  安装器缺失或抛错时返回 `false`，调用方退回自己挂的 `agent/request` 兜底钩子。**两条宿主路径都能拿到正确路由，
+  所以运行时下限保持 `>=0.1.7-0` 不变**（能特性检测就不要抬下限，见 AGENTS.md §1）。
+- **回归测试 +5 例（`scripts/test-tools-create.mjs`）**：两参数安装器必须收到调用方的 `selection`；一参数安装器必须
+  **不带**第二参数调用（并断言桩函数真实 arity 为 1）；安装器抛错时返回 `false` 且打印可读原因；安装器缺失时返回 `false`；
+  以及"已安装的 `dsh-agent` 安装器 arity 必须是 1 或 2"——上游若再改签名，这条会先红。
+- **修掉 `session_bridge_status` 在"会话尚无标题事件"时整条失败（`value is not lossless JSON`）。** 此前
+  `statusSnapshot` 无条件写 `title: titleOf(events)`，标题未产生时字段值是 `undefined`，宿主因此拒绝**整个** status 结果
+  （与 0.3.3 修过的 archived 是同一类故障：桥刚 create、还没写 title 事件的会话一查状态就整条报错）。现在按
+  `title === undefined ? {} : { title }` 省略字段——标题缺失只是信息缺失，不该让工具整体失败。
+- **构建基线抬到 `0.2.2-alpha.3`（只动 devDependencies，不动运行时下限）。** 12 个 DSH dev 范围改为
+  `>=0.2.2-alpha.3`；`cordis` 对齐到运行中 harness 的 `4.0.6-alpha.2`（DSH 0.2.2-alpha.3 把 Cordis Core 同步到
+  `4.0.0-rc.11` 一线），`@deepseek-ai/schemastery` 对齐到 `3.18.6-alpha.2`。重建后 `check:compat --strict` 全绿：
+  `lib/index.js` 内联 `0.2.2-alpha.3` + `cordis 4.0.6-alpha.2`，与已安装 harness **完全一致**。
+- **逐项复核 `0.2.2-alpha.3` 的其它改动，确认对本插件无影响**：① `SessionStore` 现在要求"进入 + `session/created` 公告完成后"
+  才允许 `append`（未公告前只读）——桥只经 `agents.create()` 与 `agent.followup()` 走宿主自己的发布路径，从不直接
+  `session.append`；② `agents.create()` 的 `setup` 时机改到"会话已进入并公告之后、Agent 注册之前"，桥的 `setup` 只做
+  `agentPresets.mount/composeFrom` 与模型选择安装，不依赖旧时机；③ `dsh-tools` 内部重构（`defineTool` 移到
+  `contracts.ts`、`ToolDefinition` 拆分）对插件用法零影响，`defineTool` 仍从包根导出；④ 新 cordis 的配置校验改成走
+  standard-schema（`runtime.Config["~standard"].validate`）——实测本插件的 `Config` 带 `~standard`（v1），校验后 9 个
+  volatile 字段仍是稳定引用（`ref(true)`/`ref("reasoning")`/…），非法值（`loopGuard: "yes"`、`loopMinConfidence: 5`）
+  仍被拒绝；⑤ `agentPresets.mount/composeFrom` 签名未变，`dsh-workspace`/`dsh-home-paths`/`dsh-util-values` 的
+  `.d.ts` 与 0.2.1-rc.1 逐字相同。
+- **闸门实测接受本版本。** 用运行中 harness（`0.2.2-alpha.3`）自己的 `evaluatePluginCompatibility` 对 `package.json`
+  manifest 求值：`ACCEPTED`（`engines.dsh` 仍是 `>=0.1.7-0`，与 8 个 peer 逐字一致）。
+- **全量验证**：`pnpm typecheck` / `pnpm check:compat --strict` / `pnpm test`（peer 下限守卫 + create 18 例 + config 20 例
+  + archived 14 例 + V4 迁移 3 例）/ `pnpm build` / `pnpm smoke`（产物挂载并注册 15 个工具）全绿。
+- **版本 0.7.0 → 0.8.0。**
+
 # 0.7.0
 
 > 0.6.0 从未发布到 npm（registry 上最高是 0.5.2），所以它下面的改动与本节一起，作为 **0.7.0** 交付。

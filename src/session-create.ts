@@ -31,6 +31,46 @@ interface ModelSelectionRef {
   assembled?: undefined
 }
 
+/**
+ * `@deepseek-ai/dsh-agent` 的 `installModelSelection` 有**两种历史签名**（0.2.2-alpha.3 改了）：
+ *
+ *  - DSH <= 0.2.1-rc.x：`installModelSelection(agentCtx, selection)` —— 第二参数是一个**可变引用**，
+ *    它挂 `agent/request` 瀑布，每次请求都把 `selection.current` 写进请求配置；
+ *  - DSH >= 0.2.2-alpha.3：`installModelSelection(agentCtx)` —— 选择权归 `AgentModel` +
+ *    `modelSelection` session 投影（`agents.create({ agentOptions })` 是"尚未记录选择时"的路由兜底），
+ *    函数只负责安装"模型切换提示"监听；第二参数被忽略。
+ *
+ * 两条路径都能拿到正确路由（我们**始终**把 provider/model/reasoningEffort 写进 `agentOptions`），
+ * 差别只在"要不要额外装那个请求改写钩子"。所以这里按**形参个数**做特性探测：
+ * 新宿主上多传的那个参数会被静默忽略，但显式分流能让意图留在代码里，也避免依赖"忽略多余实参"这种巧合。
+ */
+export type InstallModelSelection = (agentCtx: Context, selection?: ModelSelectionRef) => unknown
+
+/**
+ * 按宿主签名安装模型选择。返回 false 表示没有可用的安装器或安装失败，
+ * 调用方据此退回自己的 `agent/request` 兜底钩子（旧宿主上的最后一道保险）。
+ */
+export function installModelSelectionCompat(
+  install: InstallModelSelection | undefined,
+  agentCtx: Context,
+  selection: ModelSelectionRef,
+): boolean {
+  if (install === undefined) return false
+  try {
+    // 老签名：两参数，第二参数是可变选择引用。
+    if (install.length >= 2) install(agentCtx, selection)
+    // 新签名：一参数，选择已由 agentOptions/投影持有。
+    else install(agentCtx)
+    return true
+  } catch (error) {
+    console.warn(
+      '[dsh-session-bridge] installModelSelection failed, falling back to the agent/request hook:',
+      error instanceof Error ? error.message : String(error),
+    )
+    return false
+  }
+}
+
 /** 创建会话时的调用方：模型路由从它的 session 请求头继承，预设从它的 ctx 组合。 */
 export interface BridgeSessionCaller {
   ctx: Context
@@ -90,7 +130,9 @@ export async function createBridgeSession(
       ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     },
   }
-  const installModelSelection = (agentApi as unknown as { installModelSelection?: (agentCtx: Context, selection: ModelSelectionRef) => () => void }).installModelSelection
+  // 0.2.2-alpha.3 起 `installModelSelection` 从 `(agentCtx, selection)` 变成 `(agentCtx)`；
+  // 按形参个数分流（见 installModelSelectionCompat），两种宿主都能用。
+  const installModelSelection = (agentApi as unknown as { installModelSelection?: InstallModelSelection }).installModelSelection
 
   const sessionId = `${options.idPrefix ?? 'sb-'}${randomUUID()}`
   const agents = ctx.agents as unknown as {
@@ -123,10 +165,7 @@ export async function createBridgeSession(
         const presets = ctx.agentPresets as unknown as { composeFrom(agentCtx: Context, parentCtx: Context): string | undefined }
         presets.composeFrom(agentCtx, caller.ctx)
       }
-      if (installModelSelection !== undefined) {
-        installModelSelection(agentCtx, selection)
-        return
-      }
+      if (installModelSelectionCompat(installModelSelection, agentCtx, selection)) return
       // 兜底：只重写请求配置（模型选择拆分可接受）。
       const hookable = agentCtx as unknown as { on(name: string, listener: (...args: unknown[]) => unknown): unknown }
       hookable.on('agent/request', async (payload: unknown, next: unknown) => {
