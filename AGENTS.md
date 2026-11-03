@@ -195,6 +195,33 @@ cd "$env:TEMP\ci-check"; pnpm install --frozen-lockfile; pnpm build
 
 然后更新 `README.zh.md` / `README.md` 的「实测于 x.y.z」与 `CHANGELOG.md`，必要时发新版本。
 
+**坑 4：CI 的 `pnpm install --frozen-lockfile` 会被 24h 供应链策略拒，而本机永远看不见。**
+本机 `pnpm config get minimumReleaseAge` 是 `0`（关掉了），CI 是 pnpm 11 默认的 `1440`，于是
+`--frozen-lockfile` 会逐个校验锁文件里包的**发布时间**，把 24h 内发布的条目判违规：
+
+```
+[ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] 6 lockfile entries failed verification:
+  @deepseek-ai/cordis-plugin-group@1.0.6-alpha.2 was published at ..., within the minimumReleaseAge cutoff
+  @deepseek-ai/dsh-official-bundles@0.2.2-alpha.3 was published at ...
+  ...
+```
+
+v0.8.0 第一次推 tag 就栽在这里：CI 与 Publish 两个 workflow 的 "Install dependencies" 同时红掉（版本号已被 tag
+占掉，npm 上什么都没有）。**根因不止"dev 范围抬到新 tuple"**——上游一次发版会顺带把**新的传递依赖名**带进锁文件
+（本次是 `dsh-official-bundles`、`dsh-util-time`），以及 cordis 那一线的新 alpha 版本
+（`cordis-plugin-group@1.0.6-alpha.2`、`cordis-plugin-include@1.0.11-alpha.2`、`cordis-plugin-loader@1.0.7-alpha.2`、
+`cosmokit@1.8.7-alpha.2`），它们都不在 `pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude` 里。
+
+三条规则：
+
+- **每次抬 dev tuple / 换 harness 后，按 CI 的真实策略本地复现一次安装**（这是唯一能提前发现它的方式）：
+  `pnpm install --frozen-lockfile --config.minimumReleaseAge=1440 --registry=https://registry.npmjs.org`，
+  报出的每条 `@scope/name@version` 都补进 `minimumReleaseAgeExclude`。
+- **DSH 包只写包名（不带版本）**，cordis / schemastery / cosmokit 那条线沿用「钉版本 + `||`」的写法
+  （它们与 DSH 不同步发版，写包名会把整条线永久放行）。
+- 发布 workflow 用的是 npmjs + `--provenance`，与本地 registry 无关；上面的复现命令必须显式带
+  `--registry=https://registry.npmjs.org` 才等价。
+
 ### 上游破坏了函数签名时：先特性检测，再考虑抬下限（0.2.2-alpha.3 实例）
 
 `0.2.2-alpha.3` 把 `@deepseek-ai/dsh-agent` 的 `installModelSelection(agentCtx, selection)` 改成
