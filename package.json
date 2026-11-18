@@ -1,7 +1,7 @@
 {
   "name": "dsh-session-bridge",
-  "version": "0.8.0",
-  "description": "会话桥（dsh-session-bridge）：通过提示词创建新的主会话（顶层 UI 会话）、向任意会话发送消息、等待会话的下一条回复、读取会话消息，并按会话名或 id 跨工作区查找会话；此外支持监控/调度主任务（含思维链循环检测 → 自动中断并把任务转移到新会话）、子代理处置与归档/取消归档会话。",
+  "version": "0.9.0",
+  "description": "会话桥（dsh-session-bridge）：通过提示词创建新的主会话（顶层 UI 会话）、向任意会话发送消息、等待会话的下一条回复、读取会话消息，并按会话名或 id 跨工作区查找会话；此外支持监控/调度主任务（含思维链循环检测 → 自动中断并把任务转移到新会话）、子代理处置、归档/取消归档会话，以及会话收藏（★，不置顶）与按天数的每小时自动归档。",
   "private": false,
   "type": "module",
   "main": "./lib/index.js",
@@ -30,6 +30,7 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./client": "./client/index.js",
     "./package.json": "./package.json"
   },
   "engines": {
@@ -40,6 +41,7 @@
   "files": [
     "lib/index.js",
     "lib/types/**/*.d.ts",
+    "client/index.js",
     "dsh.plugin.json",
     "cordis.patch.yml",
     "scripts",
@@ -54,13 +56,21 @@
     "build:client": "tsdown",
     "check:compat": "node scripts/check-dsh-compat.mjs",
     "smoke": "node scripts/smoke-bundle.mjs",
-    "test": "node scripts/test-peer-floor.mjs && node --experimental-strip-types scripts/test-bridge-core.mjs && node --experimental-strip-types scripts/test-loop-guard.mjs && node --experimental-strip-types scripts/test-handoff.mjs && node --experimental-strip-types scripts/test-monitor-loop.mjs && node --experimental-strip-types scripts/test-tools-create.mjs && node --experimental-strip-types scripts/test-config.mjs && node --experimental-strip-types scripts/test-tools-archived.mjs && node --experimental-strip-types --test scripts/test-v4.mjs",
+    "test": "node scripts/test-peer-floor.mjs && node --experimental-strip-types scripts/test-bridge-core.mjs && node --experimental-strip-types scripts/test-loop-guard.mjs && node --experimental-strip-types scripts/test-handoff.mjs && node --experimental-strip-types scripts/test-monitor-loop.mjs && node --experimental-strip-types scripts/test-tools-create.mjs && node --experimental-strip-types scripts/test-config.mjs && node --experimental-strip-types scripts/test-tools-archived.mjs && node --experimental-strip-types scripts/test-tools-segments.mjs && node --experimental-strip-types scripts/test-auto-archive.mjs && node --experimental-strip-types scripts/test-favorites.mjs && node --experimental-strip-types scripts/test-settings-route.mjs && node scripts/test-client-bundle.mjs && node --experimental-strip-types --test scripts/test-v4.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepare": "tsdown"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-locale"
+      ]
     }
   },
   "license": "MIT",

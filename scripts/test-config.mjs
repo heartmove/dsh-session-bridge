@@ -9,7 +9,7 @@
  * 直接跑 src/*.ts（node --experimental-strip-types），与其余脚本一致。
  */
 import assert from 'node:assert/strict'
-import { Config, LOOP_DESCENDANTS_VALUES, LOOP_FIELD_VALUES, createLoopPolicy, readValue } from '../src/config.ts'
+import { Config, LOOP_DESCENDANTS_VALUES, LOOP_FIELD_VALUES, createArchivePolicy, createLoopPolicy, parseSessionIdList, readValue } from '../src/config.ts'
 import { COMMAND_NAME, ENTRY_ID, createConfigWriter, loopCommandStatus, registerLoopCommands, runLoopCommand } from '../src/commands.ts'
 
 let passed = 0
@@ -49,6 +49,15 @@ assert.equal(readValue(true), true)
 assert.equal(readValue({ get: () => false }), false)
 assert.equal(readValue(undefined), undefined)
 ok('readValue accepts both volatile references and plain values')
+
+// 自动归档的三个设置项：默认“不归档 + 7 天 + 空名单”，且都必须是 settings 页可渲染的 volatile 字段。
+assert.ok(fields.includes('autoArchive'), 'Config must declare autoArchive')
+assert.ok(fields.includes('autoArchiveDays'), 'Config must declare autoArchiveDays')
+assert.ok(fields.includes('autoArchiveExclude'), 'Config must declare autoArchiveExclude')
+assert.equal(parsed.autoArchive.get(), false, 'autoArchive default must be false (no archiving out of the box)')
+assert.equal(parsed.autoArchiveDays.get(), 7, 'autoArchiveDays default must be 7')
+assert.equal(parsed.autoArchiveExclude.get(), '', 'autoArchiveExclude default must be empty')
+ok('auto-archive knobs default to off / 7 days / empty exclusion list')
 
 // ---------- 2) 策略：总开关与默认值 ----------
 assert.equal(createLoopPolicy(undefined).enabled(), true, 'no config → feature on')
@@ -191,6 +200,38 @@ ok('reset drops the in-memory override')
 
 assert.ok(loopCommandStatus({ policy: createLoopPolicy({ loopGuard: false }), writeConfig: async () => ({ ok: true, message: '' }) }).includes('关闭'))
 ok('status reflects a disabled switch')
+
+// ---------- 3b) 自动归档策略 ----------
+const archiveDefaults = createArchivePolicy(undefined)
+assert.equal(archiveDefaults.enabled(), false, 'auto-archive must default to off')
+assert.equal(archiveDefaults.days(), 7, 'auto-archive must default to 7 days')
+assert.equal(archiveDefaults.exclude().size, 0, 'no exclusion-list entries by default')
+
+const archiveCustom = createArchivePolicy({
+  autoArchive: true,
+  autoArchiveDays: 30,
+  autoArchiveExclude: ' a, b\nc ;a ',
+})
+assert.equal(archiveCustom.enabled(), true)
+assert.equal(archiveCustom.days(), 30)
+assert.deepEqual([...archiveCustom.exclude()].sort(), ['a', 'b', 'c'], 'comma/space/semicolon separated ids, de-duplicated')
+
+assert.equal(createArchivePolicy({ autoArchiveDays: 0 }).days(), 1, 'days clamp to the floor')
+assert.equal(createArchivePolicy({ autoArchiveDays: 99999 }).days(), 3650, 'days clamp to the ceiling')
+assert.equal(createArchivePolicy({ autoArchiveDays: 'soon' }).days(), 7, 'invalid days fall back to 7')
+assert.equal(createArchivePolicy({ autoArchive: 'yes' }).enabled(), false, 'only a real boolean enables archiving')
+
+let liveArchive = false
+const liveArchivePolicy = createArchivePolicy({ autoArchive: { get: () => liveArchive } })
+assert.equal(liveArchivePolicy.enabled(), false)
+liveArchive = true
+assert.equal(liveArchivePolicy.enabled(), true, 'a live volatile update must flip the switch without a reload')
+
+assert.equal(parseSessionIdList(undefined).size, 0)
+assert.equal(parseSessionIdList('   ').size, 0)
+assert.equal(parseSessionIdList(42).size, 0)
+assert.deepEqual([...parseSessionIdList('x y')], ['x', 'y'])
+ok('createArchivePolicy reads live volatile values, parses the list and clamps the day count')
 
 // ---------- 4) 命令注册：可选服务探测 ----------
 const registered = []

@@ -12,8 +12,9 @@ other real DSH sessions directly from a prompt — create sessions, send
 messages to any session, wait for and read replies, resume offline sessions,
 and find sessions across workspaces. On top of that it can **monitor and
 schedule** a main task (watch its progress, nudge or correct its direction,
-and stop it), and **archive** sessions the same way the DSH sidebar's Archive
-action does.
+and stop it), **archive** sessions the same way the DSH sidebar's Archive
+action does, **favorite** sessions from the workspace session menu (★, *not*
+pinning), and **auto-archive** stale sessions every hour by age.
 
 > 中文文档见 [README.zh.md](./README.zh.md).
 
@@ -81,6 +82,20 @@ action does.
   archive size and summarize the newest ids, and `session_bridge_archived`
   windows the listing with an optional `limit` (default 50, newest first) while
   `total` always reports the real size.
+- **Favorite sessions (not pinning).** The workspace session context menu (`…`)
+  gains a **Favorite / Remove favorite** item, and a favorited session renders
+  **★** at its row's trailing edge (after the relative-time label, before the
+  shipped pin marker). A favorite is the plugin's own marker: it never calls
+  `pinSession`, never reorders sessions — it only renders ★ and exempts the
+  session from auto-archive. Because that is its only effect, the **whole
+  favorites UI (menu item, ★, settings block) and `session_bridge_favorite` are
+  hidden while auto-archive is off**; turning auto-archive on restores the
+  existing favorites unchanged. `session_bridge_favorite` reads and writes the
+  same set (favorite / unfavorite / list).
+- **Auto-archive by age.** When enabled the plugin **archives stale main
+  sessions once an hour**: last activity older than N days, not favorited, not
+  in the exclusion list, not pinned, not live, not a subagent, not already
+  archived. Off by default, threshold **7 days** by default.
 
 ## Monitoring worker
 
@@ -243,6 +258,69 @@ A single watchdog can still opt out on its own:
 | `loopCooldownMs` | `60000` | Per-signature cooldown in ms |
 | `loopMaxTransfers` | `3` | Transfer budget (`0` = interrupt only) |
 | `loopDescendants` | `report` | Subagent policy, see the table below |
+| `autoArchive` | `false` | **Auto-archive master switch** (off by default, see the next section) |
+| `autoArchiveDays` | `7` | Auto-archive age threshold in days (1–3650) |
+| `autoArchiveExclude` | `''` | Session ids that are never auto-archived (comma / whitespace separated) |
+
+## Favorites and auto-archive
+
+### Favorites (★, not pinning)
+
+- **Where**: workspace session row → `…` menu → **Favorite / Remove favorite**. It is rendered through
+  the same menu service as the built-in Pin / Rename / Fork / Archive actions (identical icon slot, row
+  height and keyboard navigation) and sits right before Archive. The result shows at the row's trailing
+  edge: a favorited session renders **★** after its relative-time label and before the built-in pin marker.
+- **Semantics**: a favorite is this plugin's own marker, stored in `~/.dsh/session-bridge-favorites.json`.
+  It is **not** DSH pinning — it never calls `pinSession`, never reorders sessions, and never blocks a
+  manual archive. It only does two things: render ★, and exempt the session from auto-archive.
+- **One source of truth**: the browser half and the host share
+  `GET/POST /session-bridge/favorites` (same-origin), and the `session_bridge_favorite` tool writes the
+  same store — the UI action and the tool are the same operation.
+- **With auto-archive off the whole favorites UI disappears** (menu item, row ★, settings block) and
+  `session_bridge_favorite` refuses explicitly — the favorite set itself is kept and comes back as soon
+  as auto-archive is on again.
+- **No Web composition** (headless / CLI): the route is simply not mounted; favorites stay available
+  through the tool and auto-archive still reads them.
+
+### Settings page (Settings → Session archive)
+
+The settings sidebar gains a **Session archive** page (star + archive line icon) holding:
+
+| Control | Field | Notes |
+|---|---|---|
+| Auto-archive toggle | `autoArchive` | off by default |
+| Days of inactivity | `autoArchiveDays` | 1–3650, default 7 |
+| Never archive these ids | `autoArchiveExclude` | comma / whitespace separated |
+| Interrupt chain-of-thought loops | `loopGuard` | the same switch as `/cot-loop` and the plugin form |
+| Favorites | — | lists the current set, each removable |
+
+The page talks to `GET/POST /session-bridge/settings`, and the host still writes through the same
+`configEditor` path as `/cot-loop` — so the slash command, the plugin settings form and this page all
+edit one config, and volatile fields apply from the next pass. A deployment without `configEditor`
+shows the page as read-only and the Save button reports the refusal instead of pretending.
+
+### Auto-archive
+
+One batch per **hour** (the first run fires 60 s after the plugin starts). A session is archived only when
+**all** of these hold:
+
+| Condition | Meaning |
+|---|---|
+| main session | `header.origin !== 'subagent'`; subagent sessions are not archived on their own |
+| not archived | id is not in `workspaceRegistry.archivedSessionIds` |
+| not favorited | id is not in the favorite set |
+| not excluded | id is not listed in `autoArchiveExclude` |
+| not pinned | id is not in `pinnedSessionIds` (archiving drops a pin, so pinned sessions are skipped) |
+| not live | id is not among the currently live agents |
+| old enough | last activity is **strictly** older than N days (exactly N days is left alone) |
+
+"Last activity" is the session log file's mtime, falling back to `header.createdAt`; when neither is
+available the session is skipped — an unknown age is never treated as very old. A batch archives at most
+200 sessions (oldest first), a single failure is only reported, and a host refusal ("the session is
+active") is skipped and retried on the next pass.
+
+The three `autoArchive*` fields are volatile: a settings change applies from the next batch, with no
+restart or plugin reload.
 
 ## Requirements
 
@@ -261,7 +339,8 @@ pnpm build
 # type-check src/ against the dsh that is actually installed (no checkout needed)
 npm run check:compat
 
-# regression tests: peer floor, wait/stall core, loop detection + handoff, watchdog loop, archived handler, V3→V4
+# regression tests: peer floor, wait/stall core, loop detection + handoff, watchdog loop,
+# archived handler, auto-archive, favorites + route, client bundle, V3→V4
 npm test
 
 # via the injector toolchain
@@ -418,6 +497,7 @@ registration and junction; not re-assembled on restart).
 | `session_bridge_archive` | Archive a session (hidden from groupings; history and position preserved); requires `stopActivity: true` for a running one. Reports the id, the archive size and the newest ids. |
 | `session_bridge_unarchive` | Unarchive a session (visible again at its recorded position; unknown ids are a no-op). |
 | `session_bridge_archived` | List the archive set (newest first, optional `limit`, default 50), optionally resolving titles for the returned ids. |
+| `session_bridge_favorite` | Favorite / unfavorite a session (`sessionId` + `favorite`, defaults to favoriting) or list the favorite set (omit `sessionId`, or pass `list: true`); shares the same data as the UI ★ and is **not** pinning. Optional `resolveTitles`. |
 
 All tools return lossless JSON; wait-style tools never throw on timeout — they
 return a `timedOut` / `aborted` / `stale` flag.
@@ -434,6 +514,11 @@ src/
   handoff.ts  the handoff prompt (task/context extraction + subagent sections + template)
   session-create.ts  the single session-creation implementation (shared by the create tool and loop transfer)
   registry.ts bridge-side title/workspace registry (~/.dsh/session-bridge-registry.json)
+  favorites.ts  the favorite set (~/.dsh/session-bridge-favorites.json, serialized writes)
+  auto-archive.ts  auto-archive (candidate filter / mtime threshold / hourly schedule)
+  routes.ts   the favorites' same-origin HTTP face (GET/POST /session-bridge/favorites)
+client/
+  index.js    browser half: session-menu favorite action + row ★ (module-loader bundle)
 scripts/
   build.sh    compatibility wrapper for npm run build
   test-bridge-core.mjs  wait/stall regression tests (npm test)
@@ -441,8 +526,12 @@ scripts/
   test-handoff.mjs  handoff-prompt regression tests (placeholders + subagent sections)
   test-monitor-loop.mjs  end-to-end watchdog loop tests (transfer, the five subagent scenarios, budget, failure)
   test-tools-archived.mjs  archive/unarchive + archived-handler regression tests (npm test)
+  test-auto-archive.mjs  auto-archive regression tests (seven exclusions, threshold edges, mtime fallback, schedule)
+  test-favorites.mjs  favorite-store + same-origin route tests (auth, media type, body cap)
+  test-settings-route.mjs  settings route tests (validation, clamping, partial update, refused write)
+  test-client-bundle.mjs  client-bundle shape tests (menu contribution, icon keys, ★, settings page, no-menu fallback)
   check-dsh-compat.mjs  type-check src/ against installed DSH + verify bundle provenance (npm run check:compat)
-  smoke-bundle.mjs  mount the built lib/index.js and assert every tool registers (npm run smoke)
+  smoke-bundle.mjs  mount the built lib/index.js and assert 16 tools, the favorites/settings routes and the hourly schedule
 ```
 
 ## Lifecycle and unloading

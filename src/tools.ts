@@ -34,7 +34,8 @@ import {
 import { createBridgeSession, type BridgeSessionCaller } from './session-create.ts'
 import type { BridgeRegistry } from './registry.ts'
 import type { SessionMonitor, MonitorConfig, MonitorEntryState, CoTRule } from './monitor.ts'
-import type { LoopPolicy } from './config.ts'
+import type { ArchivePolicy, LoopPolicy } from './config.ts'
+import type { FavoritesStore } from './favorites.ts'
 
 type SessionIdBrand = { readonly __sessionIdBrand?: never }
 
@@ -44,6 +45,10 @@ export interface BridgeEnv {
   monitor: SessionMonitor
   /** 插件级循环策略（总开关 + 全局默认值）：渲染与默认值都读它。 */
   policy: LoopPolicy
+  /** 收藏集合：会话菜单/行 ★ 与 session_bridge_favorite 共用的唯一真源。 */
+  favorites: FavoritesStore
+  /** 自动归档策略：收藏功能跟着它走（关闭时收藏 UI 与本工具一起下线）。 */
+  archive: ArchivePolicy
 }
 
 function asJson(value: unknown): Record<string, JsonValue> {
@@ -439,6 +444,10 @@ function registerSegments(env: BridgeEnv): void {
           const tools = Array.isArray(sg.toolCalls) && sg.toolCalls.length > 0 ? ' [tools: ' + sg.toolCalls.join(',') + ']' : ''
           return head + tools + reason + ': ' + text.slice(0, 160)
         })
+        // 分批读取时必须把"还有多少段"告诉模型：否则它会把本批当成会话的全部输出，
+        // 不再用 nextCursorSeq 继续翻页（render 才是模型看到的内容，schema 字段看不到）。
+        const remaining = typeof v.remaining === 'number' ? v.remaining : 0
+        if (remaining > 0) lines.push('(more: ' + String(remaining) + ' newer segments remain — pass sinceSeq: ' + String(v.nextCursorSeq) + ' to page forward)')
         return [{ type: 'text' as const, text: lines.join('\n') }]
       },
     },
@@ -460,13 +469,20 @@ function registerSegments(env: BridgeEnv): void {
       }
       const sinceSeq = typeof args.sinceSeq === 'number' && Number.isInteger(args.sinceSeq) && args.sinceSeq >= 0 ? args.sinceSeq : 0
       const limit = clampLimit(args.limit, 10, 50)
-      const segs = segmentsSince(events, sinceSeq)
+      // sinceSeq 是"向前翻页"的排他游标，所以本批取 sinceSeq 之后**最早的** limit 段
+      // （不是最新的 limit 段），nextCursorSeq 只落在本批最后一段。这两件事缺一不可：
+      // 不截断会把整个会话的段落一次塞进上下文（长会话一次几万 token），而且
+      // nextCursorSeq 会跳到会话末尾，让 sinceSeq 分页永远翻不动。
+      const all = segmentsSince(events, sinceSeq)
+      const segs = all.slice(0, limit)
       env.registry.touch(args.sessionId)
       const nextCursorSeq = segs.length === 0 ? sinceSeq : (segs[segs.length - 1]?.seq ?? sinceSeq)
       return asJson({
         sessionId: args.sessionId,
         live,
         nextCursorSeq,
+        returned: segs.length,
+        remaining: all.length - segs.length,
         segments: segs.map((sg) => ({
           seq: sg.seq,
           time: sg.time,
@@ -722,6 +738,98 @@ function registerFind(env: BridgeEnv): void {
   }))
 }
 
+/** 解析一批会话的标题：bridge 登记表的别名优先，其次会话日志里的标题/首条用户消息。 */
+async function resolveSessionTitles(env: BridgeEnv, ids: readonly string[]): Promise<Map<string, string | undefined>> {
+  const titles = new Map<string, string | undefined>()
+  try {
+    const records = await env.registry.all()
+    for (const rec of records) if (rec.title !== undefined) titles.set(rec.sessionId, rec.title)
+  } catch { /* best-effort */ }
+  for (const sessionId of ids) {
+    if (titles.get(sessionId) !== undefined) continue
+    try {
+      const inspection = await inspectPersistedSession(env.ctx, sessionId)
+      titles.set(sessionId, titleOf(inspection.events))
+    } catch { /* offline title unavailable */ }
+  }
+  return titles
+}
+
+interface FavoriteArgs {
+  sessionId?: string
+  favorite?: boolean
+  list?: boolean
+  resolveTitles?: boolean
+}
+
+/**
+ * 收藏 / 取消收藏 / 列出收藏。
+ *
+ * 与 `workspaceRegistry.pinSession` 的区别是本插件最容易被误解的一点：
+ * pin 会把会话顶到列表最前（并禁止归档），而收藏**只**做两件事 ——
+ * 在会话行显示 ★、让每小时自动归档跳过它。收藏不改变任何排序。
+ */
+function registerFavorite(env: BridgeEnv): void {
+  env.ctx.tools.register(defineTool({
+    name: 'session_bridge_favorite',
+    description: 'Favorite or unfavorite one session, or list favorites. A favorite is this plugin\'s own marker, NOT workspace pinning: it never reorders sessions and never pins them; it only shows a ★ on the session row in the workspace menu UI and exempts the session from the hourly auto-archive (autoArchive). Unavailable while auto-archive is off: favorites then have no effect and the whole favorites UI is hidden. Omit sessionId (or pass list: true) to list the favorite set; pass sessionId plus favorite: false to remove. Returns lossless JSON only (an unresolvable title is omitted, never written as undefined).',
+    parameters: {
+      sessionId: { type: 'string', description: 'Session id to favorite or unfavorite. Omit it (or set list: true) to list favorites instead.' },
+      favorite: { type: 'boolean', description: 'true favorites the session (default), false removes the favorite.' },
+      list: { type: 'boolean', description: 'When true, list the favorite set and ignore sessionId/favorite.' },
+      resolveTitles: { type: 'boolean', description: 'When listing, resolve each favorite session\'s title from the bridge registry or its log (default false). Titles are resolved only for the returned ids.' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => {
+        const v = value as Record<string, unknown>
+        const items = (v.items as Array<{ sessionId: string; title?: string }> | null) ?? []
+        if (items.length > 0) {
+          const lines = items.map((i) => i.sessionId + (i.title === undefined ? '' : ' ("' + i.title + '")'))
+          const total = typeof v.total === 'number' ? v.total : items.length
+          if (items.length < total) lines.unshift(String(total) + ' favorites; showing ' + String(items.length) + ':')
+          return [{ type: 'text' as const, text: lines.join('\n') }]
+        }
+        if (v.sessionId !== undefined) {
+          return [{ type: 'text' as const, text: (v.favorite === true ? 'favorited ' : 'unfavorited ') + String(v.sessionId) + ' (total favorites: ' + String(v.total) + ')' }]
+        }
+        return [{ type: 'text' as const, text: '(no favorite sessions)' }]
+      },
+    },
+    async execute(args: FavoriteArgs) {
+      // 收藏是"跳过自动归档"的标记：自动归档关闭时，收藏 UI（菜单项 / ★ / 设置页收藏区）
+      // 与本工具一起下线。这里抛错而不是静默写入，避免"设了收藏、界面里却看不到、也不
+      // 产生任何效果"的幽灵状态；开启后原有收藏原样回来。
+      if (env.archive.enabled() !== true) {
+        throw new Error('session_bridge_favorite is unavailable while auto-archive is off (autoArchive=false) — favorites only exist to exempt sessions from the hourly auto-archive. Enable 设置 → 会话归档 → 自动归档 (or the plugin Config field autoArchive) first.')
+      }
+      // 列表模式：显式 list:true，或干脆没给 sessionId。
+      if (args.list === true || args.sessionId === undefined) {
+        const sessionIds = await env.favorites.list()
+        if (args.resolveTitles !== true || sessionIds.length === 0) {
+          return asJson({ sessionIds, total: sessionIds.length })
+        }
+        const titles = await resolveSessionTitles(env, sessionIds)
+        return asJson({ sessionIds, items: archivedEntries(sessionIds, titles), total: sessionIds.length })
+      }
+      if (typeof args.sessionId !== 'string' || args.sessionId.trim() === '') {
+        throw new Error('invalid sessionId: expected a non-empty string')
+      }
+      if (args.favorite !== undefined && typeof args.favorite !== 'boolean') {
+        throw new Error('invalid favorite: expected a boolean')
+      }
+      const favorite = args.favorite !== false
+      const snapshot = await env.favorites.set(args.sessionId, favorite)
+      return asJson({
+        sessionId: args.sessionId,
+        favorite,
+        sessionIds: snapshot.sessionIds,
+        total: snapshot.sessionIds.length,
+      })
+    },
+  }))
+}
+
 export function registerBridgeTools(env: BridgeEnv): void {
   registerCreate(env)
   registerSend(env)
@@ -734,6 +842,7 @@ export function registerBridgeTools(env: BridgeEnv): void {
   registerCancel(env)
   registerMonitor(env)
   registerArchive(env)
+  registerFavorite(env)
 }
 
 interface MonitorStartArgs {
@@ -1182,18 +1291,7 @@ function registerArchive(env: BridgeEnv): void {
       // 解析不出来的会话就**不带** title 字段返回（绝不写 undefined —— 那会让整个
       // 工具返回值不再是 lossless JSON，宿主会拒绝它，标题缺失不该升级成整体失败）。
       // 只解析返回的这段 id：集合可能有几百个，逐个读日志会拖垮工具调用。
-      const titles = new Map<string, string | undefined>()
-      try {
-        const records = await env.registry.all()
-        for (const rec of records) if (rec.title !== undefined) titles.set(rec.sessionId, rec.title)
-      } catch { /* best-effort */ }
-      for (const sessionId of archived) {
-        if (titles.get(sessionId) !== undefined) continue
-        try {
-          const inspection = await inspectPersistedSession(env.ctx, sessionId)
-          titles.set(sessionId, titleOf(inspection.events))
-        } catch { /* offline title unavailable */ }
-      }
+      const titles = await resolveSessionTitles(env, archived)
       return asJson({ items: archivedEntries(archived, titles), returned: archived.length, total: all.length })
     },
   }))

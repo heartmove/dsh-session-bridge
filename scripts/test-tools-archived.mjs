@@ -57,7 +57,18 @@ function captureTools() {
   }
   const registry = { all: async () => [], record() {}, touch() {}, load: async () => {}, persist: async () => {} }
   const monitor = { dispose() {}, start() {}, stop: () => false, list: () => [] }
-  registerBridgeTools({ ctx, registry, monitor })
+  // 收藏集合（本文件只测归档工具；给一个最小可用实现，避免注册时缺少依赖）。
+  const favoriteIds = new Set()
+  const favorites = {
+    async list() { return [...favoriteIds] },
+    async has(sessionId) { return favoriteIds.has(sessionId) },
+    async set(sessionId, favorite = true) {
+      if (favorite) favoriteIds.add(sessionId)
+      else favoriteIds.delete(sessionId)
+      return { sessionIds: [...favoriteIds], updatedAt: Date.now() }
+    },
+  }
+  registerBridgeTools({ ctx, registry, monitor, favorites })
   return tools
 }
 
@@ -82,7 +93,9 @@ await test('registerBridgeTools registers the archived tool', () => {
   assert.ok(tools.has('session_bridge_archived'))
   assert.ok(tools.has('session_bridge_archive'))
   assert.ok(tools.has('session_bridge_unarchive'))
-  assert.equal(tools.size, 15)
+  // 0.9.0 起新增 session_bridge_favorite（收藏，与置顶无关）。
+  assert.ok(tools.has('session_bridge_favorite'))
+  assert.equal(tools.size, 16)
 })
 
 /**

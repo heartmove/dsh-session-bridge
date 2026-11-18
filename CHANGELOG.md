@@ -1,3 +1,84 @@
+# 0.9.0
+
+- **修复 `session_bridge_segments` 的 `limit` 不生效（用户反馈）。** 处理函数算了 `limit` 却没有使用它：
+  `segmentsSince()` 的结果整份返回，长会话（一百多段）一次调用把全部段落塞进上下文（可达几万 token）；
+  且 `nextCursorSeq` 取的是全量最后一段，`sinceSeq` 分页实际上翻不动。现在按"游标向后翻页"的语义取
+  `sinceSeq` 之后**最早的** `limit` 段（1–50，默认 10），`nextCursorSeq` 只落在本批最后一段；返回值新增
+  `returned` / `remaining`，render 在本批之后还有段落时追加一行提示（`more: N newer segments remain —
+  pass sinceSeq: X to page forward`），避免模型把一批当成会话的全部输出。回归测试
+  `scripts/test-tools-segments.mjs`（7 例：主症状、默认值/上限、逐页遍历恰好一次、空批、render 提示、
+  离线路径、非法 `limit`），已接入 `pnpm test`。
+
+- **会话收藏（★，非置顶）。** 工作区会话的上下文菜单（`…`）新增「收藏 / 取消收藏」——
+  它走**官方结构化菜单服务** `ctx.contextMenus`（和内置的置顶 / 重命名 / 分叉 / 归档同一条渲染路径、
+  同一套图标槽位与键盘导航），位置 order `550`（在「在文件夹显示」500 之后、「归档」600 之前），
+  图标 key 由本插件注册到 `contextMenu.icon` 槽位（实心 / 空心星随状态切换）。被收藏的会话在行尾
+  （`sidebar.session.row.trailing`，时间标签之后、官方置顶图钉之前）显示 **★**。收藏是插件自己的标记，
+  存在 `~/.dsh/session-bridge-favorites.json`：**不调用 `pinSession`、不改变任何排序**——用户明确要求
+  "收藏是收藏，不会置顶"，所以它只做两件事：显示 ★、让自动归档跳过该会话。
+  （初版用旧 `sidebar.workspaces.session.menu.item` 槽位手写按钮，实机截图上与内置项明显不同款，
+  已改为菜单服务。）
+- **收藏跟着自动归档开关走。** 自动归档关闭时（默认状态）收藏整套 UI 一起下线：会话菜单里的
+  「收藏 / 取消收藏」、会话行尾的 ★、设置页的收藏区都不渲染，`session_bridge_favorite` 也明确拒绝并说明
+  原因。收藏的唯一作用是"显示 ★ + 跳过自动归档"，没有自动归档时它不产生任何效果，留在界面上只是一个
+  没有效果的开关；收藏数据本身保留，重新开启自动归档后原样回来。设置页里的自动归档 checkbox 现改现显
+  （不必先保存），保存成功后会把开关写回浏览器侧的 store，菜单项与 ★ 立即跟随。
+- **设置页（设置 → 会话归档）。** `settings.section` + `settings.section.icon` 注册一个独立设置页：
+  自动归档开关、天数、保留名单、思维链循环总开关，以及可直接取消的收藏列表；导航图标用星形 + 归档线，
+  配色走主题 token（`--dsw-alias-*`）。页面经 `GET/POST /session-bridge/settings` 读写，host 侧仍走
+  与 `/cot-loop` 相同的 `configEditor` 写回路径，所以三处改的是同一份配置。没有 `configEditor` 的部署
+  显示"只读"并让保存按钮明确报错。
+- **新增 `session_bridge_favorite`（第 16 个工具）。** `sessionId` + `favorite`（默认收藏）/ 省略
+  `sessionId` 或 `list: true` 列出集合；可选 `resolveTitles`。与 UI 走**同一条写入路径**
+  （同一个 `FavoritesStore`），不是两套并行逻辑。
+- **收藏的同源 HTTP 面（`src/routes.ts`）。** 静态 Client 插件没有到达自定义 host 服务的 RPC 通道
+  （`host.call` 只属于动态 package，`ctx.remote.*` 只暴露官方生成的命名空间），所以用
+  `webServer.register` 挂一条 `exact` 路由 `GET/POST /session-bridge/favorites`：有 `connection` 服务时走
+  官方 `requestRejection`（Origin/Host 信任 + 浏览器 cookie），没有时**只放行回环地址**；
+  body 上限 4 KiB、只接受 `application/json`、响应 `no-store`。`webServer` 是可选注入——
+  headless / CLI 组合里路由直接不挂载，收藏仍由工具维护。
+- **会话自动归档（默认关闭）。** 每小时一轮（首轮在启动 60 秒后），批量归档同时满足
+  「主会话 / 未归档 / 未收藏 / 未列入 `autoArchiveExclude` / 未置顶 / 不活跃 / 最后活动早于 N 天」的会话。
+  阈值是**严格大于**（正好 N 天不动它），"最后活动"取会话日志 mtime、回退 `header.createdAt`，
+  两者都没有则跳过（不把"判定不了"当成"很久没动"）。置顶会话额外豁免——宿主归档会连带丢弃 pin，
+  自动归档不该替用户做这个决定。单轮上限 200（最旧优先）；宿主回「会话仍有活动」或单条失败都只记入
+  报告，不中断整轮。
+- **新增 3 个 volatile 配置字段**（设置 → Plugins → `dsh-session-bridge` 自动渲染，改完下一轮生效）：
+  `autoArchive`（默认 `false`）、`autoArchiveDays`（默认 `7`，钳制 1–3650）、`autoArchiveExclude`
+  （默认空，逗号 / 空白分隔的保留 session id）。默认值即"不归档、7 天"，升级后不会自动隐藏任何历史会话。
+- **浏览器半（`client/index.js`）。** 手写的 module-loader bundle（`window.__ModuleLoader__.load`），
+  只 `require('react')`；注册 `locale` 字典 `dsh-session-bridge`（en/zh）与四个投放面：
+  会话菜单动作（`ctx.contextMenus`，target `session`，order 550）、两个菜单图标 key（`contextMenu.icon`）、
+  行尾 ★（`sidebar.session.row.trailing`，order 10）、设置页（`settings.section` order 700 +
+  `settings.section.icon`）。收藏状态由同源路由拉取一次，成功后以服务端响应为准，不做轮询；
+  卸载时随 `ctx.effect` 清理订阅，语言切换时重新注册设置页以更新导航文案。
+  `package.json` 增加 `dsh.client` 声明与 `./client` 导出。
+- **运行时下限不变（`>=0.1.7-0`）。** 新增能力全部走**可选**依赖：`webServer` / `connection` /
+  `pinnedSessionIds` 任一缺失时降级（跳过路由、按"没有置顶"处理），`sessionPersistence` / `agents` 早已是
+  `inject` 的必需项，所以旧 harness 上收藏工具与自动归档照常工作。未改动任何 peer 范围。
+- **回归测试 +4 文件**：`scripts/test-auto-archive.mjs`（16 例：七个排除条件、阈值边界、mtime 回退、
+  active 拒绝只跳过、单条失败继续、单轮上限、配置实时生效、防重入、`dispose()` 清理定时器）、
+  `scripts/test-favorites.mjs`（15 例：加载 / 损坏回退 / 幂等 / 并发串行落盘 / 订阅；
+  GET/POST、415、400、405、超限 body、401 拒绝、非回环 403）、
+  `scripts/test-settings-route.mjs`（10 例：GET 生效值与 writable、四种字段的校验与钳制、
+  部分更新、写回失败 `ok:false`、只读部署、媒体类型/方法/body 形状、认证）、
+  `scripts/test-client-bundle.mjs`（7 例：包 id 与注入、locale 字典、菜单贡献的 target/order/observe/resolve、
+  图标 key 切换、POST 载荷、★ 只在收藏时渲染、设置页挂载即 GET 且返回清理函数、
+  无 contextMenus 时其余 UI 照常）。
+  `test-config.mjs` 增加自动归档策略与 volatile 默认值，`test-tools-archived.mjs` 的工具数改为 16，
+  `smoke-bundle.mjs` 覆盖 16 工具 / 收藏路由 / 每小时调度 / 收藏文件落盘（`DSH_HOME` 指向临时目录，
+  不再污染真实 `~/.dsh`）。
+- **修掉设置页整页空白（0.9.0 内部修复）。** 设置页最初用 slot 的 `inject` 面拿收藏集合与翻译函数，
+  实机重启后导航项正常出现、内容区却完全空白——组件在解构 `props.t` / `props.favorites` 时就抛错，
+  被 slot 的 entry-error seam 卸载，于是只剩空白（crashed entries are removed, not rendered）。
+  现在三处组件都改为**闭包取依赖**（`translate()` 每次现取 locale 绑定），owner 只负责传 `sessionId`
+  这类真有契约的字段；`hooks` 与渲染体也拆开，渲染体包 try/catch，任何异常都会显示成页面文本而不是白屏。
+  回归测试用**迷你 hooks 运行时**（`useState` 真触发重渲染、`useEffect` 按 deps 只跑一次）渲染到 ready，
+  断言四个控件与收藏列表都在、失败时显示"读取设置失败 + 原因"。
+- **全量验证**：`pnpm typecheck` / `pnpm test`（含新增 48 例）/ `pnpm build` / `pnpm smoke` /
+  `pnpm check:compat` 全绿。
+- **版本 0.8.0 → 0.9.0。**
+
 # 0.8.0
 
 - **适配 DSH `0.2.2-alpha.3`，并修掉它引入的一个真破坏：`installModelSelection` 少了一个参数。** 上游把

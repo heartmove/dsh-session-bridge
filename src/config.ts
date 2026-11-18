@@ -55,6 +55,9 @@ export interface PluginConfig {
   loopCooldownMs: number
   loopMaxTransfers: number
   loopDescendants: string
+  autoArchive: boolean
+  autoArchiveDays: number
+  autoArchiveExclude: string
 }
 
 /** Cordis config schema：由 profile 的 entry 配置或设置页表单填充。 */
@@ -124,6 +127,27 @@ export const Config: z<PluginConfig> = z.object({
       .string()
       .default('report')
       .description('转移时如何处理仍在运行的子代理：report（只写进交接说明）/ stop（先停掉）/ ignore（不提）。'),
+  ),
+  autoArchive: volatile(
+    z
+      .boolean()
+      .default(false)
+      .description('会话自动归档总开关：默认关闭；开启后每小时批量归档长期未活动的会话。'),
+  ),
+  autoArchiveDays: volatile(
+    z
+      .number()
+      .step(1)
+      .min(1)
+      .max(3650)
+      .default(7)
+      .description('自动归档阈值：最后活动早于这么多天的会话才会被归档（默认 7）。'),
+  ),
+  autoArchiveExclude: volatile(
+    z
+      .string()
+      .default('')
+      .description('永不自动归档的会话 id 保留名单，逗号或空白分隔；与收藏一起构成“指定保留”的会话。'),
   ),
 })
 
@@ -208,6 +232,49 @@ export function createLoopPolicy(config?: unknown): LoopPolicy {
     },
     hasConfig() {
       return readValue<boolean>(bag.loopGuard) !== undefined
+    },
+  }
+}
+
+/**
+ * 自动归档策略：总开关、天数与“指定保留”名单。
+ *
+ * 三者都从 volatile 引用**实时**读取（设置页改完下一轮就生效，无需重启），
+ * 所以自动归档引擎每轮都问一次 policy，而不是构造时缓存一份快照。
+ */
+export interface ArchivePolicy {
+  /** 总开关（默认 false = 不归档）。 */
+  enabled(): boolean
+  /** 归档阈值天数（默认 7，钳制在 1..3650）。 */
+  days(): number
+  /** “指定的会话”保留名单（逗号 / 空白分隔的 session id）。 */
+  exclude(): ReadonlySet<string>
+}
+
+/** 把逗号 / 空白分隔的名单解析成去重的 id 集合。 */
+export function parseSessionIdList(raw: unknown): Set<string> {
+  const text = readValue<string>(raw)
+  const ids = new Set<string>()
+  if (typeof text !== 'string') return ids
+  for (const part of text.split(/[\s,;]+/)) {
+    const id = part.trim()
+    if (id !== '') ids.add(id)
+  }
+  return ids
+}
+
+/** 从插件的 Config 构造归档策略；config 缺失时全部走内置默认值。 */
+export function createArchivePolicy(config?: unknown): ArchivePolicy {
+  const bag = (config ?? {}) as Record<string, unknown>
+  return {
+    enabled() {
+      return readValue<boolean>(bag.autoArchive) === true
+    },
+    days() {
+      return readNumber(bag.autoArchiveDays, 7, 1, 3650)
+    },
+    exclude() {
+      return parseSessionIdList(bag.autoArchiveExclude)
     },
   }
 }

@@ -8,7 +8,8 @@
 一个 [DSH](https://www.deepseek.com) 插件：让当前 agent 能通过提示词驱动其它真实的 DSH 会话——
 创建主会话、向任意会话发消息、等待并读取回复、恢复离线会话、跨工作区按名称或 id 查找会话。
 在此之上，它还能**监控并调度**一个主任务（观察进度、卡住时催办、偏离时纠偏、必要时终止），
-以及像 DSH 侧边栏的 Archive 一样**归档**会话。
+像 DSH 侧边栏的 Archive 一样**归档**会话，并在工作区会话菜单里**收藏**会话（★，不置顶），
+再按天数把长期没动过的会话**每小时自动归档**。
 
 > English docs: [README.md](./README.md).
 
@@ -51,6 +52,14 @@
   只省略标题，不会让整个调用失败。归档集合会无限增长，因此 archive/unarchive 的结果只报
   受影响 id + 集合规模并摘要最新若干条，`session_bridge_archived` 支持可选 `limit`
   （默认 50、从最新往回取，`total` 始终是真实规模）。
+- **收藏会话（不置顶）。** 工作区会话的上下文菜单（`…`）里多一项「收藏 / 取消收藏」，被收藏的会话在
+  行尾（时间标签之后、官方置顶图钉之前）显示 **★**。收藏是插件自己的标记，**不调用
+  `pinSession`、不改变任何排序**——它只做两件事：显示 ★、让自动归档跳过该会话。
+  因此**自动归档关闭时收藏整套 UI（菜单项、★、设置页收藏区）与工具都不出现**：一个不产生效果的
+  开关只会把界面弄脏；重新开启自动归档后原有收藏原样回来。
+  `session_bridge_favorite` 让 agent 也能读写同一份收藏集合（收藏 / 取消 / 列出）。
+- **按天数自动归档。** 开启后插件**每小时**批量归档「最后活动早于 N 天、未被收藏、未被列入保留名单、
+  未置顶、当前不活跃、非子代理、尚未归档」的主会话；默认**关闭**、默认阈值 **7 天**。
 
 ## 监控守护循环
 
@@ -185,6 +194,61 @@
 | `loopCooldownMs` | `60000` | 同一签名的冷却时间（毫秒） |
 | `loopMaxTransfers` | `3` | 最多转移几次（`0` = 只中断不转移） |
 | `loopDescendants` | `report` | 子代理处置策略，见下表 |
+| `autoArchive` | `false` | **自动归档总开关**（默认关闭，见下一节） |
+| `autoArchiveDays` | `7` | 自动归档阈值天数（1–3650） |
+| `autoArchiveExclude` | `''` | 永不自动归档的会话 id 保留名单（逗号 / 空白分隔） |
+
+## 会话收藏与自动归档
+
+### 收藏（★，不置顶）
+
+- **入口**：侧边栏工作区里的会话行 → `…` 菜单 → **收藏 / 取消收藏**（与内置的置顶 / 重命名 /
+  分叉 / 归档走同一个菜单服务渲染，图标、行高、键盘导航完全一致；位置在「归档」之前）。
+  结果显示在行尾：被收藏的会话在时间标签之后、置顶图钉之前出现 **★**。
+- **语义**：收藏是插件自维护的标记，存放在 `~/.dsh/session-bridge-favorites.json`，**不是 DSH 的置顶（pin）**：
+  不调用 `pinSession`，不改变分组顺序，也不阻止你手动归档。它只做两件事——显示 ★、让自动归档跳过该会话。
+- **多端一致**：浏览器半与 host 通过同源路由 `GET/POST /session-bridge/favorites` 读写同一个集合，
+  与工具 `session_bridge_favorite` 完全等价（UI 与工具走同一条写入路径）。
+- **自动归档关闭时整套收藏 UI 消失**：菜单项、行尾 ★、设置页收藏区都不渲染，`session_bridge_favorite`
+  也会明确拒绝（开启后原样恢复）。收藏的唯一作用是"跳过自动归档"，没有自动归档时它不产生任何效果。
+- **无 Web 组合**（headless / CLI）：路由不挂载，收藏仍可由工具维护，自动归档照常读取。
+
+### 设置页（设置 → 会话归档）
+
+设置面板左侧导航多一页 **会话归档**（图标为星形 + 归档线），页内提供：
+
+| 控件 | 写入字段 | 说明 |
+|---|---|---|
+| 自动归档开关 | `autoArchive` | 默认关闭 |
+| 超过多少天未活动 | `autoArchiveDays` | 1–3650，默认 7 |
+| 永不自动归档的会话 id | `autoArchiveExclude` | 逗号 / 空白分隔 |
+| 思维链循环自动中断 | `loopGuard` | 与 `/cot-loop`、插件设置表单同一个开关 |
+| 收藏列表 | —— | 列出当前收藏，可逐个取消 |
+
+页面经 `GET/POST /session-bridge/settings` 读写，host 侧仍走与 `/cot-loop` 相同的 `configEditor`
+写回路径，所以三处（斜杠命令、插件表单、这一页）改的是**同一份配置**，volatile 字段改完下一轮即生效。
+没有 `configEditor` 的部署会显示"设置为只读"，保存按钮明确报错而不是假装成功。
+
+### 自动归档
+
+每 **1 小时**跑一轮（首轮在插件启动 60 秒后），扫描会话持久化列表，归档同时满足下列**全部**条件的会话：
+
+| 条件 | 说明 |
+|---|---|
+| 主会话 | `header.origin !== 'subagent'`，子代理会话不单独归档 |
+| 未归档 | 不在 `workspaceRegistry.archivedSessionIds` 里 |
+| 未收藏 | 不在上面的收藏集合里 |
+| 未指定保留 | 不在 `autoArchiveExclude` 名单里 |
+| 未置顶 | 不在 `pinnedSessionIds` 里（置顶会话被归档会连带丢掉 pin，故直接跳过） |
+| 不活跃 | 不在当前 live 的 agent 列表里 |
+| 足够久 | 「最后活动」早于 N 天（**严格大于**：正好 N 天不动它） |
+
+「最后活动」取该会话日志文件的 mtime；拿不到（路径缺失、权限不足）时回退 `header.createdAt`，
+两者都拿不到则跳过——**不会**把"判定不了"当成"很久没动"。
+单轮最多归档 200 个（最旧优先）；任何单条失败只计入报告，不中断整轮；
+宿主以「会话仍有活动」拒绝时同样只跳过，下一轮再判。
+
+三个配置字段都是 volatile：改完**下一轮**就按新值走，不需要重启或重载插件。
 
 ## 环境要求
 
@@ -203,7 +267,8 @@ pnpm build
 # 针对"实际安装的 dsh"做类型检查（不需要 checkout）
 npm run check:compat
 
-# peer 下限守卫、wait/卡住判定、循环判定与交接、守护循环端到端、archived handler、V3→V4 迁移
+# peer 下限守卫、wait/卡住判定、循环判定与交接、守护循环端到端、archived handler、
+# 自动归档候选/阈值/调度、收藏存储与路由、Client bundle 形状、V3→V4 迁移
 npm test
 
 # 或经注入器工具链
@@ -343,6 +408,7 @@ dev_inject_plugin D:\code\dsh-session-bridge
 | `session_bridge_archive` | 归档会话（从分组隐藏；历史与位置保留）；对运行中的会话需显式 `stopActivity: true`。返回受影响 id、集合规模与最新若干条。 |
 | `session_bridge_unarchive` | 取消归档（回到原位置重新可见；未知/未归档 id 为幂等空操作）。 |
 | `session_bridge_archived` | 列出归档集合（从最新往回，可选 `limit`，默认 50），可选为返回的 id 解析标题。 |
+| `session_bridge_favorite` | 收藏 / 取消收藏（`sessionId` + `favorite`，默认收藏），或列出收藏集合（省略 `sessionId` 或 `list: true`）；与 UI 的 ★ 共用同一份数据，**不置顶**。可选 `resolveTitles`。 |
 
 所有工具输出 lossless JSON；等待类工具超时不抛错，返回 `timedOut` / `aborted` / `stale` 标记。
 
@@ -350,14 +416,19 @@ dev_inject_plugin D:\code\dsh-session-bridge
 
 ```
 src/
-  index.ts    host 插件入口（注册工具；挂载监控）
+  index.ts    host 插件入口（注册工具；挂载收藏路由与自动归档调度）
   core.ts     共享 host 逻辑（create/send/wait/read/find、status 快照、archive 记账）
-  tools.ts    工具注册（bridge + status/cancel + monitor + archive）
+  tools.ts    工具注册（bridge + status/cancel + monitor + archive + favorite）
   monitor.ts  后台守护循环（statusSnapshot + 规则 + 循环检测/转移 + 可选 LLM 判定）
   loop-guard.ts  思维链循环判定（纯函数：切单元 + 尾部周期重复 + n-gram 兜底）
   handoff.ts  交接提示词（任务/上下文提取 + 子代理分段 + 模板）
   session-create.ts  建会话的唯一实现（create 工具与循环转移共用）
   registry.ts 桥侧标题/workspace 登记表（~/.dsh/session-bridge-registry.json）
+  favorites.ts  收藏集合（~/.dsh/session-bridge-favorites.json，串行落盘）
+  auto-archive.ts  自动归档（候选过滤 / mtime 阈值 / 每小时调度）
+  routes.ts   收藏的同源 HTTP 面（GET/POST /session-bridge/favorites）
+client/
+  index.js    浏览器半：会话菜单收藏项 + 行尾 ★（module-loader bundle）
 scripts/
   build.sh    类型检查 + 链接 DSH checkout 类型
   test-bridge-core.mjs  wait/卡住判定回归测试（npm test）
@@ -365,8 +436,12 @@ scripts/
   test-handoff.mjs  交接提示词回归测试：占位符 + 子代理分段（npm test）
   test-monitor-loop.mjs  守护循环端到端回归：转移/子代理五场景/预算/失败保留（npm test）
   test-tools-archived.mjs  归档 / 取消归档 + archived handler 回归测试（npm test）
+  test-auto-archive.mjs  自动归档回归：七个排除条件 / 阈值边界 / mtime 回退 / 调度（npm test）
+  test-favorites.mjs  收藏存储 + 同源路由回归（认证、媒体类型、body 上限）（npm test）
+  test-settings-route.mjs  设置路由回归：四个字段的校验 / 钳制 / 部分更新 / 写回失败（npm test）
+  test-client-bundle.mjs  Client bundle 形状回归：菜单贡献 / 图标 key / ★ / 设置页 / 无菜单服务降级（npm test）
   check-dsh-compat.mjs  对已安装 DSH 做 src/ 类型检查 + 校验产物来源（npm run check:compat）
-  smoke-bundle.mjs  挂载构建产物 lib/index.js 并断言工具全部注册（npm run smoke）
+  smoke-bundle.mjs  挂载产物并断言 16 工具 / 收藏与设置路由 / 每小时调度（npm run smoke）
 ```
 
 ## 生命周期与卸载

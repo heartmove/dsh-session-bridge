@@ -14,22 +14,34 @@
  * needed: the bundle is plain ESM JavaScript.
  */
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'index.js')
 
+// 收藏与桥登记表都落在 DSH home 下。冒烟测试不能污染真实 ~/.dsh，所以在 import
+// 产物（它会 inline dsh-home-paths）之前把 DSH_HOME 指到临时目录。
+const HOME = mkdtempSync(join(tmpdir(), 'dsh-smoke-'))
+process.env.DSH_HOME = HOME
+process.on('exit', () => {
+  try { rmSync(HOME, { recursive: true, force: true }) } catch { /* best-effort */ }
+})
+
 const mod = await import(pathToFileURL(BUNDLE).href)
 
 const tools = new Map()
 const archive = []
 const calls = []
+const routes = []
+const timers = { intervals: [], timeouts: [], cleared: [] }
 const ctx = {
   tools: { register: (tool) => { tools.set(tool.name, tool) } },
   workspaceRegistry: {
     get archivedSessionIds() { return archive },
+    get pinnedSessionIds() { return [] },
     async archiveSession(id, options) {
       calls.push({ verb: 'archive', id, options })
       if (options?.stopActivity !== true) throw new Error('the session is active (turn)')
@@ -41,10 +53,23 @@ const ctx = {
       if (at !== -1) archive.splice(at, 1)
     },
   },
-  sessionPersistence: { open: async () => ({ header: {}, read: async () => ({ events: [] }), close: async () => {} }) },
+  sessionPersistence: {
+    open: async () => ({ header: {}, read: async () => ({ events: [] }), close: async () => {} }),
+    list: async () => [],
+  },
   agents: { get: () => undefined, list: () => [] },
-  setInterval: () => 0,
-  clearInterval: () => {},
+  // 可选服务注入：只有 webServer 存在时收藏路由才会挂上。
+  inject: (names, callback) => {
+    const child = { effect: (fn) => fn() }
+    if (names.includes('webServer')) {
+      child.webServer = { register: (route) => { routes.push(route); return () => {} } }
+    }
+    callback(child)
+  },
+  setInterval: (callback, ms) => { timers.intervals.push(ms); return 0 },
+  clearInterval: () => { timers.cleared.push('interval') },
+  setTimeout: (callback, ms) => { timers.timeouts.push(ms); return 0 },
+  clearTimeout: () => { timers.cleared.push('timeout') },
   effect: () => {},
 }
 
@@ -58,7 +83,7 @@ const expected = [
   'session_bridge_segments', 'session_bridge_read', 'session_bridge_find', 'session_bridge_status',
   'session_bridge_cancel', 'session_bridge_monitor_start', 'session_bridge_monitor_stop',
   'session_bridge_monitor_list', 'session_bridge_archive', 'session_bridge_unarchive',
-  'session_bridge_archived',
+  'session_bridge_archived', 'session_bridge_favorite',
 ]
 assert.deepEqual([...tools.keys()].sort(), [...expected].sort(), 'registered tool set')
 
@@ -164,7 +189,8 @@ const ctx2 = {
     callback(child)
   },
 }
-mod.apply(ctx2, { loopGuard: false })
+// ctx2 打开自动归档：收藏功能只在它开启时可用，收藏工具的成功路径在这里跑。
+mod.apply(ctx2, { loopGuard: false, autoArchive: true })
 await new Promise((done) => setTimeout(done, 50))
 
 assert.equal(commands.length, 1, 'apply() must register the /cot-loop command when the host has a command surface')
@@ -193,5 +219,102 @@ const bundleWithSwitch = readFileSync(BUNDLE, 'utf8')
 for (const marker of ['cot-loop', '思维链循环自动中断', 'volatile']) {
   assert.ok(bundleWithSwitch.includes(marker), 'the rebuilt bundle must inline the switch wiring: ' + marker)
 }
+
+// --- favorites + hourly auto-archive (0.9.0) ---------------------------------
+// Artifact-level contracts the src/ tests cannot prove: the shipped bundle really
+// registers the favorite tool, mounts the favorites HTTP route the Client half
+// calls, and schedules the hourly auto-archive batch.
+assert.ok(configFields.includes('autoArchive'), 'Config must expose autoArchive (the settings switch)')
+assert.ok(configFields.includes('autoArchiveDays'), 'Config must expose autoArchiveDays')
+assert.ok(configFields.includes('autoArchiveExclude'), 'Config must expose autoArchiveExclude')
+
+const favoriteTool = tools.get('session_bridge_favorite')
+const favoriteParams = JSON.stringify(favoriteTool.parameters ?? {})
+for (const name of ['sessionId', 'favorite', 'list', 'resolveTitles']) {
+  assert.ok(favoriteParams.includes(name), 'session_bridge_favorite must declare ' + name)
+}
+assert.match(String(favoriteTool.description), /NOT workspace pinning/, 'the tool must state favorites are not pins')
+
+// 默认配置（autoArchive=false）下收藏功能整体下线：工具必须明确拒绝，而不是静默写入。
+await assert.rejects(
+  () => favoriteTool.execute({ sessionId: 'ui-1' }, {}),
+  (error) => String(error.message).includes('autoArchive'),
+)
+await assert.rejects(
+  () => favoriteTool.execute({ list: true }, {}),
+  (error) => String(error.message).includes('autoArchive'),
+)
+
+// autoArchive=true 的那个挂载（ctx2）才是收藏可用的形态。
+const favoriteToolOn = tools2.get('session_bridge_favorite')
+const favorited = await favoriteToolOn.execute({ sessionId: 'ui-1' }, {})
+assert.equal(favorited.favorite, true)
+assert.deepEqual(favorited.sessionIds, ['ui-1'])
+assert.equal(favorited.total, 1)
+assert.deepEqual(JSON.parse(JSON.stringify(favorited)), favorited)
+
+const listed = await favoriteToolOn.execute({}, {})
+assert.deepEqual(listed.sessionIds, ['ui-1'])
+assert.deepEqual(JSON.parse(JSON.stringify(listed)), listed)
+
+const unfavorited = await favoriteToolOn.execute({ sessionId: 'ui-1', favorite: false }, {})
+assert.deepEqual(unfavorited.sessionIds, [])
+assert.equal(unfavorited.total, 0)
+
+// 收藏与置顶无关：archive/unarchive 的语义不受影响（上面已断言），且没有调用 pin。
+assert.equal(typeof ctx.workspaceRegistry.pinSession, 'undefined', 'the bundle must never call pinSession for favorites')
+
+const favoritesRoute = routes.find((route) => route.path === '/session-bridge/favorites')
+assert.ok(favoritesRoute !== undefined, 'apply() must mount the favorites route when webServer exists')
+assert.equal(favoritesRoute.kind, 'exact')
+
+// 设置页的数据面：同一条 webServer 上再挂一条 /session-bridge/settings。
+const settingsRoute = routes.find((route) => route.path === '/session-bridge/settings')
+assert.ok(settingsRoute !== undefined, 'apply() must mount the settings route when webServer exists')
+assert.equal(settingsRoute.kind, 'exact')
+
+/** 驱动一条路由处理器（node:http 风格桩）。 */
+async function callRoute(route, { method = 'GET', body } = {}) {
+  const res = {
+    statusCode: 200,
+    headers: {},
+    body: undefined,
+    setHeader(name, value) { res.headers[name.toLowerCase()] = value },
+    end(value) { res.body = value },
+  }
+  const req = {
+    method,
+    headers: body === undefined ? {} : { 'content-type': 'application/json' },
+    socket: { remoteAddress: '127.0.0.1' },
+  }
+  req[Symbol.asyncIterator] = async function* () {
+    if (body !== undefined) yield Buffer.from(JSON.stringify(body))
+  }
+  route.handler(req, res)
+  await new Promise((done) => setTimeout(done, 10))
+  return { status: res.statusCode, json: res.body === undefined ? undefined : JSON.parse(res.body) }
+}
+
+const settingsGet = await callRoute(settingsRoute)
+assert.equal(settingsGet.status, 200)
+assert.equal(settingsGet.json.settings.autoArchive, false, 'the shipped default must be "auto-archive off"')
+assert.equal(settingsGet.json.settings.autoArchiveDays, 7, 'the shipped default must be 7 days')
+
+// 本桩没有 configEditor：写回必须明确报失败，而不是假装成功。
+const settingsPost = await callRoute(settingsRoute, { method: 'POST', body: { autoArchiveDays: 30 } })
+assert.equal(settingsPost.status, 200)
+assert.equal(settingsPost.json.ok, false, 'without configEditor the write must report failure')
+assert.ok(String(settingsPost.json.message).length > 0, 'the failure must carry a reason')
+
+assert.ok(timers.intervals.includes(3_600_000), 'auto-archive must schedule an hourly interval')
+assert.ok(timers.timeouts.includes(60_000), 'auto-archive must run a first pass shortly after startup')
+
+for (const marker of ['auto-archive', 'session-bridge/favorites', '/session-bridge/favorites', '/session-bridge/settings']) {
+  assert.ok(bundleWithSwitch.includes(marker), 'the rebuilt bundle must inline favorites/auto-archive wiring: ' + marker)
+}
+assert.ok(
+  readFileSync(join(HOME, 'session-bridge-favorites.json'), 'utf8').includes('sessionIds'),
+  'the favorite set must persist under DSH_HOME',
+)
 
 console.log('smoke-bundle: OK — lib/index.js mounts and registers ' + String(tools.size) + ' tools')
