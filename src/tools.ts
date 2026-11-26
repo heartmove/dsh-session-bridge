@@ -247,6 +247,14 @@ function registerSend(env: BridgeEnv): void {
     async execute(args: SendArgs, exec) {
       if (typeof args.sessionId !== 'string' || args.sessionId.trim() === '') throw new Error('invalid sessionId: expected a non-empty string')
       if (typeof args.message !== 'string' || args.message.trim() === '') throw new Error('invalid message: expected a non-empty string')
+      // Self-send is never meaningful and can create a feedback loop in which the
+      // session's own bridge message is injected back as a user turn. exec.agent is
+      // the host-provided caller identity; if a very old host omits it we cannot
+      // prove self-send, so keep compatibility rather than guessing.
+      const caller = exec.agent as LiveAgentLike | undefined
+      if (caller !== undefined && caller.id === args.sessionId) {
+        throw new Error('session_bridge_send refuses self-send: caller and target are both ' + JSON.stringify(args.sessionId) + '. Choose a different target session.')
+      }
       const agent = liveAgent(env, args.sessionId)
       if (agent === undefined) {
         throw new Error('session ' + JSON.stringify(args.sessionId) + ' is not live — call session_bridge_resume first to bring it online (or session_bridge_find to locate it)')
